@@ -4,6 +4,7 @@ const { Client, GatewayIntentBits, Partials, REST, Routes, SlashCommandBuilder, 
 require('./keep_alive.js'); // Starts a tiny web server so UptimeRobot can ping this bot
 const { handleActivity } = require('./activityTracker.js');
 const roleManager = require('./roleManager.js');
+const embedBuilder = require('./embedBuilder.js');
 
 const client = new Client({
   intents: [
@@ -47,6 +48,11 @@ const commands = [
   new SlashCommandBuilder()
     .setName('listactivityroles')
     .setDescription('List all configured activity role pairs (Admin only)')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName('embed')
+    .setDescription('Build and send a custom embed message (Admin only)')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 ].map(command => command.toJSON());
 
@@ -133,12 +139,160 @@ client.on('interactionCreate', async interaction => {
       await interaction.reply({ embeds: [embed], ephemeral: true });
     }
 
+    else if (commandName === 'embed') {
+      if (!interaction.memberPermissions.has(PermissionFlagsBits.Administrator)) {
+        await interaction.reply({ content: 'You need Administrator permission to use this.', ephemeral: true });
+        return;
+      }
+      embedBuilder.clearSession(interaction.user.id); // start fresh each time
+      await interaction.showModal(embedBuilder.buildInitialModal());
+    }
+
   } catch (error) {
     console.error(`Error handling command ${commandName}:`, error);
     if (interaction.replied || interaction.deferred) {
       await interaction.followUp({ content: 'Something went wrong running that command.', ephemeral: true });
     } else {
       await interaction.reply({ content: 'Something went wrong running that command.', ephemeral: true });
+    }
+  }
+});
+
+// ---- Embed builder: modal submissions ----
+client.on('interactionCreate', async interaction => {
+  if (!interaction.isModalSubmit()) return;
+
+  try {
+    const session = embedBuilder.getSession(interaction.user.id);
+
+    if (interaction.customId === 'embed_initial_modal') {
+      const title = interaction.fields.getTextInputValue('title');
+      const description = interaction.fields.getTextInputValue('description');
+      const colorInput = interaction.fields.getTextInputValue('color');
+      const footer = interaction.fields.getTextInputValue('footer');
+      const image = interaction.fields.getTextInputValue('image');
+
+      if (title) session.title = title;
+      if (description) session.description = description;
+      if (footer) session.footer = footer;
+      if (image) session.image = image;
+
+      if (colorInput) {
+        const parsed = embedBuilder.parseColor(colorInput);
+        if (parsed === null) {
+          await interaction.reply({ content: `⚠️ "${colorInput}" isn't a valid hex color (use something like #5865F2). The rest was saved — you can fix the color from here, or run /embed again to restart.`, ephemeral: true });
+        } else {
+          session.color = parsed;
+        }
+      }
+
+      const embedPreview = embedBuilder.buildEmbedFromSession(session);
+      await interaction.reply({
+        content: '**Embed preview** — use the buttons below to add more, then Send when ready.',
+        embeds: [embedPreview],
+        components: embedBuilder.buildControlRows(),
+        ephemeral: true,
+      });
+    }
+
+    else if (interaction.customId === 'embed_addfield_modal') {
+      const name = interaction.fields.getTextInputValue('name');
+      const value = interaction.fields.getTextInputValue('value');
+      const inlineInput = (interaction.fields.getTextInputValue('inline') || '').trim().toLowerCase();
+      const inline = inlineInput === 'yes' || inlineInput === 'y' || inlineInput === 'true';
+
+      if (session.fields.length >= 25) {
+        await interaction.reply({ content: 'An embed can only have up to 25 fields.', ephemeral: true });
+        return;
+      }
+      session.fields.push({ name, value, inline });
+
+      const embedPreview = embedBuilder.buildEmbedFromSession(session);
+      await interaction.update({
+        content: '**Embed preview** — use the buttons below to add more, then Send when ready.',
+        embeds: [embedPreview],
+        components: embedBuilder.buildControlRows(),
+      });
+    }
+
+    else if (interaction.customId === 'embed_author_modal') {
+      const name = interaction.fields.getTextInputValue('name');
+      const iconURL = interaction.fields.getTextInputValue('iconURL');
+      const url = interaction.fields.getTextInputValue('url');
+
+      session.author = { name, iconURL, url };
+
+      const embedPreview = embedBuilder.buildEmbedFromSession(session);
+      await interaction.update({
+        content: '**Embed preview** — use the buttons below to add more, then Send when ready.',
+        embeds: [embedPreview],
+        components: embedBuilder.buildControlRows(),
+      });
+    }
+
+    else if (interaction.customId === 'embed_thumbnail_modal') {
+      const thumbnail = interaction.fields.getTextInputValue('thumbnail');
+      session.thumbnail = thumbnail;
+
+      const embedPreview = embedBuilder.buildEmbedFromSession(session);
+      await interaction.update({
+        content: '**Embed preview** — use the buttons below to add more, then Send when ready.',
+        embeds: [embedPreview],
+        components: embedBuilder.buildControlRows(),
+      });
+    }
+
+  } catch (error) {
+    console.error('Error handling embed modal:', error);
+    const errMsg = { content: 'Something went wrong building that embed. It may contain an invalid URL or a field that\'s too long.', ephemeral: true };
+    if (interaction.replied || interaction.deferred) {
+      await interaction.followUp(errMsg);
+    } else {
+      await interaction.reply(errMsg);
+    }
+  }
+});
+
+// ---- Embed builder: button clicks ----
+client.on('interactionCreate', async interaction => {
+  if (!interaction.isButton()) return;
+  if (!interaction.customId.startsWith('embed_')) return;
+
+  try {
+    if (interaction.customId === 'embed_addfield_button') {
+      await interaction.showModal(embedBuilder.buildFieldModal());
+    }
+
+    else if (interaction.customId === 'embed_author_button') {
+      await interaction.showModal(embedBuilder.buildAuthorModal());
+    }
+
+    else if (interaction.customId === 'embed_thumbnail_button') {
+      await interaction.showModal(embedBuilder.buildThumbnailModal());
+    }
+
+    else if (interaction.customId === 'embed_send_button') {
+      const session = embedBuilder.getSession(interaction.user.id);
+      const finalEmbed = embedBuilder.buildEmbedFromSession(session);
+
+      await interaction.channel.send({ embeds: [finalEmbed] });
+      embedBuilder.clearSession(interaction.user.id);
+
+      await interaction.update({ content: '✅ Sent!', embeds: [finalEmbed], components: [] });
+    }
+
+    else if (interaction.customId === 'embed_cancel_button') {
+      embedBuilder.clearSession(interaction.user.id);
+      await interaction.update({ content: '❌ Cancelled.', embeds: [], components: [] });
+    }
+
+  } catch (error) {
+    console.error('Error handling embed button:', error);
+    const errMsg = { content: 'Something went wrong. The embed may have an invalid URL somewhere.', ephemeral: true };
+    if (interaction.replied || interaction.deferred) {
+      await interaction.followUp(errMsg);
+    } else {
+      await interaction.reply(errMsg);
     }
   }
 });
