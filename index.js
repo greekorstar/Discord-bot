@@ -23,38 +23,6 @@ const commands = [
     .setDescription('Check if the bot is alive and see its latency'),
 
   new SlashCommandBuilder()
-    .setName('hello')
-    .setDescription('Say hello to the bot'),
-
-  new SlashCommandBuilder()
-    .setName('userinfo')
-    .setDescription('Get info about a user')
-    .addUserOption(option =>
-      option.setName('target')
-        .setDescription('The user to look up (leave blank for yourself)')
-        .setRequired(false)),
-
-  new SlashCommandBuilder()
-    .setName('serverinfo')
-    .setDescription('Get info about this server'),
-
-  new SlashCommandBuilder()
-    .setName('avatar')
-    .setDescription('Get a user\'s avatar')
-    .addUserOption(option =>
-      option.setName('target')
-        .setDescription('The user whose avatar to show (leave blank for yourself)')
-        .setRequired(false)),
-
-  new SlashCommandBuilder()
-    .setName('roll')
-    .setDescription('Roll a dice')
-    .addIntegerOption(option =>
-      option.setName('sides')
-        .setDescription('Number of sides on the dice (default 6)')
-        .setRequired(false)),
-
-  new SlashCommandBuilder()
     .setName('addactivityrole')
     .setDescription('Add or update an activity role pair (Admin only)')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
@@ -113,76 +81,7 @@ client.on('interactionCreate', async interaction => {
   try {
     if (commandName === 'ping') {
       const latency = Date.now() - interaction.createdTimestamp;
-      await interaction.reply(`🏓 Pong! Latency: ${latency}ms | API Latency: ${Math.round(client.ws.ping)}ms`);
-    }
-
-    else if (commandName === 'hello') {
-      await interaction.reply(`👋 Hello, ${interaction.user.username}!`);
-    }
-
-    else if (commandName === 'userinfo') {
-      const target = interaction.options.getUser('target') || interaction.user;
-      const member = interaction.guild ? await interaction.guild.members.fetch(target.id).catch(() => null) : null;
-
-      const embed = new EmbedBuilder()
-        .setTitle(`User Info: ${target.username}`)
-        .setThumbnail(target.displayAvatarURL())
-        .addFields(
-          { name: 'Username', value: target.username, inline: true },
-          { name: 'ID', value: target.id, inline: true },
-          { name: 'Account Created', value: `<t:${Math.floor(target.createdTimestamp / 1000)}:D>`, inline: true },
-        )
-        .setColor(0x5865F2);
-
-      if (member) {
-        embed.addFields({
-          name: 'Joined Server',
-          value: `<t:${Math.floor(member.joinedTimestamp / 1000)}:D>`,
-          inline: true,
-        });
-      }
-
-      await interaction.reply({ embeds: [embed] });
-    }
-
-    else if (commandName === 'serverinfo') {
-      if (!interaction.guild) {
-        await interaction.reply('This command only works in a server.');
-        return;
-      }
-
-      const guild = interaction.guild;
-      const embed = new EmbedBuilder()
-        .setTitle(`Server Info: ${guild.name}`)
-        .setThumbnail(guild.iconURL())
-        .addFields(
-          { name: 'Members', value: `${guild.memberCount}`, inline: true },
-          { name: 'Created', value: `<t:${Math.floor(guild.createdTimestamp / 1000)}:D>`, inline: true },
-          { name: 'Owner ID', value: guild.ownerId, inline: true },
-        )
-        .setColor(0x5865F2);
-
-      await interaction.reply({ embeds: [embed] });
-    }
-
-    else if (commandName === 'avatar') {
-      const target = interaction.options.getUser('target') || interaction.user;
-      const embed = new EmbedBuilder()
-        .setTitle(`${target.username}'s Avatar`)
-        .setImage(target.displayAvatarURL({ size: 512 }))
-        .setColor(0x5865F2);
-
-      await interaction.reply({ embeds: [embed] });
-    }
-
-    else if (commandName === 'roll') {
-      const sides = interaction.options.getInteger('sides') || 6;
-      if (sides < 2) {
-        await interaction.reply('The dice needs at least 2 sides!');
-        return;
-      }
-      const result = Math.floor(Math.random() * sides) + 1;
-      await interaction.reply(`🎲 You rolled a **${result}** (out of ${sides})`);
+      await interaction.reply({ content: `🏓 Pong! Latency: ${latency}ms | API Latency: ${Math.round(client.ws.ping)}ms`, ephemeral: true });
     }
 
     else if (commandName === 'addactivityrole') {
