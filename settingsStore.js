@@ -1,6 +1,10 @@
-// settingsStore.js — Persists settings configured live via /setup (channel/role picks).
-// These take priority over the matching config.js values when both are set, so
-// /setup and manually editing config.js can be mixed freely.
+// settingsStore.js — Simple persisted key/value store for settings configured
+// live via /setup (channel IDs, role IDs, etc). Values set here take priority
+// over the fallback defaults in config.js — see how it's called elsewhere:
+//   settingsStore.get('someKey', config.someSection.someKeyFallback)
+//
+// Falls back to the second argument whenever the key hasn't been set yet
+// (or was explicitly saved as an empty string).
 
 const fs = require('fs');
 const path = require('path');
@@ -11,9 +15,10 @@ let settings = {};
 
 function load() {
   try {
-    settings = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+    const raw = fs.readFileSync(DATA_FILE, 'utf8');
+    settings = JSON.parse(raw);
   } catch (err) {
-    settings = {};
+    settings = {}; // file doesn't exist yet, or is corrupt — start fresh
   }
 }
 
@@ -25,14 +30,14 @@ function save() {
   }
 }
 
+function get(key, fallback) {
+  const value = settings[key];
+  return (value === undefined || value === null || value === '') ? fallback : value;
+}
+
 function set(key, value) {
   settings[key] = value;
   save();
-}
-
-// Returns the /setup value if one has been set, otherwise falls back to a config.js default.
-function get(key, fallback) {
-  return settings[key] || fallback;
 }
 
 load();
