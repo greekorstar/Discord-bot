@@ -95,11 +95,17 @@ async function logMessageDelete(message) {
   if (!message.guild || message.author?.bot) return;
   if (isExempt(message.guild, message.author?.id)) return;
 
+  const attachment = message.attachments?.first();
+
   const embed = new EmbedBuilder()
     .setDescription(`🗑️ Message by <@${message.author?.id || 'unknown'}> deleted in <#${message.channel.id}>`)
     .addFields({ name: 'Content', value: message.content?.slice(0, 1000) || '*(no text content — embed/attachment only)*' })
     .setColor(0xED4245)
+    .setFooter({ text: message.author?.tag || 'Unknown user', iconURL: message.author?.displayAvatarURL?.() || undefined })
     .setTimestamp();
+
+  if (attachment) embed.addFields({ name: 'Attachment', value: attachment.url });
+  if (attachment?.contentType?.startsWith('image/')) embed.setImage(attachment.url);
 
   await postLog(message.guild, embed);
 }
@@ -141,6 +147,47 @@ async function logGuildBanRemove(ban) {
   await postLog(ban.guild, embed);
 }
 
+// ---- Prefix command usage (mirrors logCommand, for !prefix-style commands) ----
+
+async function logPrefixCommand(message, commandName, argsText) {
+  if (!message.guild) return;
+  if (isExempt(message.guild, message.author.id)) return;
+
+  const embed = new EmbedBuilder()
+    .setDescription(`⌨️ <@${message.author.id}> used **${commandName}**${argsText ? `\n${argsText}` : ''}`)
+    .setColor(0x5865F2)
+    .setFooter({ text: `#${message.channel?.name || 'unknown channel'}` })
+    .setTimestamp();
+
+  await postLog(message.guild, embed);
+}
+
+// ---- Purge ----
+
+async function logPurge(guild, channel, executor, count, targetUser) {
+  if (isExempt(guild, executor.id)) return;
+
+  const embed = new EmbedBuilder()
+    .setDescription(`🧹 <@${executor.id}> purged **${count}** message(s) in <#${channel.id}>${targetUser ? ` from **${targetUser.tag}**` : ''}`)
+    .setColor(0xED4245)
+    .setTimestamp();
+
+  await postLog(guild, embed);
+}
+
+// ---- Role add/remove (via the !role prefix command) ----
+
+async function logRoleChange(guild, executor, targetMember, role, action) {
+  if (isExempt(guild, executor.id)) return;
+
+  const embed = new EmbedBuilder()
+    .setDescription(`${action === 'add' ? '➕' : '➖'} <@${executor.id}> ${action === 'add' ? 'added' : 'removed'} **${role.name}** ${action === 'add' ? 'to' : 'from'} <@${targetMember.id}>`)
+    .setColor(action === 'add' ? 0x57F287 : 0xED4245)
+    .setTimestamp();
+
+  await postLog(guild, embed);
+}
+
 // ---- Setup ----
 
 function buildSetupRows() {
@@ -180,6 +227,9 @@ module.exports = {
   isExempt,
   logAction,
   logCommand,
+  logPrefixCommand,
+  logPurge,
+  logRoleChange,
   logMessageDelete,
   logMessageEdit,
   logGuildBanAdd,

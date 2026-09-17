@@ -17,6 +17,7 @@ const joinLeaveSystem = require('./joinLeaveSystem.js');
 const setupWizard = require('./setupWizard.js');
 const permissions = require('./permissions.js');
 const verificationSystem = require('./verificationSystem.js');
+const prefixSystem = require('./prefixSystem.js');
 
 const client = new Client({
   intents: [
@@ -1004,7 +1005,11 @@ client.on('inviteDelete', invite => inviteTracker.onInviteChange(invite.guild));
 client.on('guildCreate', guild => inviteTracker.cacheGuildInvites(guild));
 
 // ---- General server log ----
-client.on('messageDelete', message => logSystem.logMessageDelete(message).catch(err => console.error('[logSystem] messageDelete failed:', err.message)));
+client.on('messageDelete', message => {
+  prefixSystem.recordDeletedMessage(message);
+  logSystem.logMessageDelete(message).catch(err => console.error('[logSystem] messageDelete failed:', err.message));
+});
+client.on('messageDeleteBulk', messages => prefixSystem.recordDeletedMessages(messages));
 client.on('messageUpdate', (oldMessage, newMessage) => logSystem.logMessageEdit(oldMessage, newMessage).catch(err => console.error('[logSystem] messageUpdate failed:', err.message)));
 client.on('guildBanAdd', ban => logSystem.logGuildBanAdd(ban).catch(err => console.error('[logSystem] guildBanAdd failed:', err.message)));
 client.on('guildBanRemove', ban => logSystem.logGuildBanRemove(ban).catch(err => console.error('[logSystem] guildBanRemove failed:', err.message)));
@@ -1160,6 +1165,7 @@ client.on('messageCreate', async message => {
     const member = message.member || await message.guild.members.fetch(message.author.id).catch(() => null);
     await handleActivity(member);
     await levelSystem.handleMessageXp(message).catch(err => console.error('[levelSystem] message XP failed:', err.message));
+    await prefixSystem.handleMessage(message).catch(err => console.error('[prefixSystem] Failed to handle prefix command:', err.message));
   } catch (err) {
     console.error('[activity] Error handling message activity:', err.message);
   }
