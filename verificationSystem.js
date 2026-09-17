@@ -57,7 +57,14 @@ async function handleVerifyStart(interaction) {
   }
 
   // CAPTCHA method
-  const { code, caseSensitive, buffer } = captchaGenerator.generateCaptcha(config.difficulty);
+  let code, caseSensitive, buffer;
+  try {
+    ({ code, caseSensitive, buffer } = captchaGenerator.generateCaptcha(config.difficulty));
+  } catch (err) {
+    console.error('CAPTCHA generation failed:', err.message);
+    await interaction.reply({ content: 'Verification is temporarily unavailable — the CAPTCHA image couldn\'t be generated. Please tell an admin.', ephemeral: true });
+    return;
+  }
   verificationStore.startCaptchaSession(interaction.user.id, code, caseSensitive);
 
   const attachment = new AttachmentBuilder(buffer, { name: 'captcha.png' });

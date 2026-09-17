@@ -3,8 +3,19 @@
 // prebuilt binaries per-platform instead of needing native compilation —
 // much more likely to actually install cleanly on a host like Railway.
 
-const { createCanvas } = require('@napi-rs/canvas');
 const crypto = require('crypto');
+
+// Loaded defensively: if @napi-rs/canvas isn't installed (e.g. a host's
+// npm install silently skipped it, or its native binary doesn't support
+// the platform), we don't want that to crash the ENTIRE bot on startup —
+// just this one feature. generateCaptcha() below throws a clear, catchable
+// error instead so the caller can show a friendly message.
+let createCanvas = null;
+try {
+  ({ createCanvas } = require('@napi-rs/canvas'));
+} catch {
+  createCanvas = null;
+}
 
 const DIFFICULTY_SETTINGS = {
   easy: { length: 4, chars: 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789', caseSensitive: false, noiseLines: 2, rotation: 0.15, fontSizeVariance: 0 },
@@ -23,6 +34,13 @@ function randomColor(minBrightness, maxBrightness) {
 
 // Returns { code, caseSensitive, buffer } where buffer is a PNG Buffer.
 function generateCaptcha(difficulty) {
+  if (!createCanvas) {
+    throw new Error(
+      'CAPTCHA images are unavailable because the @napi-rs/canvas package failed to load. ' +
+      'Check that it\'s listed in package.json and that the host\'s build/install logs show it installing successfully.'
+    );
+  }
+
   const settings = DIFFICULTY_SETTINGS[difficulty] || DIFFICULTY_SETTINGS.medium;
 
   let code = '';

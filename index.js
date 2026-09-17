@@ -6,7 +6,6 @@ const { handleActivity } = require('./activityTracker.js');
 const roleManager = require('./roleManager.js');
 const embedBuilder = require('./embedBuilder.js');
 const buttonRegistry = require('./buttonRegistry.js');
-const scamDetector = require('./scamDetector.js');
 const config = require('./config.js');
 const ticketSystem = require('./ticketSystem.js');
 const settingsStore = require('./settingsStore.js');
@@ -1161,37 +1160,6 @@ client.on('messageCreate', async message => {
     const member = message.member || await message.guild.members.fetch(message.author.id).catch(() => null);
     await handleActivity(member);
     await levelSystem.handleMessageXp(message).catch(err => console.error('[levelSystem] message XP failed:', err.message));
-
-    // Scam detection — skip staff (Administrator or Manage Messages) so mods/admins are never auto-banned
-    const isStaff = member && (member.permissions.has(PermissionFlagsBits.Administrator) || member.permissions.has(PermissionFlagsBits.ManageMessages));
-    if (member && !isStaff) {
-      const result = scamDetector.checkMessage(message);
-      if (result && result.flagged) {
-        console.log(`[scam-detection] Flagged ${message.author.tag}: ${result.reason}`);
-
-        let dmText = config.scamDetection.banDmMessage.replace('{serverName}', message.guild.name);
-        if (config.scamDetection.appealServerInvite) {
-          dmText += `\n\nAppeal here: ${config.scamDetection.appealServerInvite}`;
-        }
-
-        try {
-          await message.author.send(dmText);
-        } catch (dmErr) {
-          console.log(`[scam-detection] Could not DM ${message.author.tag} before banning (their DMs are likely closed).`);
-        }
-
-        await message.delete().catch(() => {});
-
-        try {
-          await message.guild.members.ban(message.author.id, { reason: `Auto-ban: suspected scam — ${result.reason}` });
-          console.log(`[scam-detection] Banned ${message.author.tag}: ${result.reason}`);
-        } catch (banErr) {
-          console.error(`[scam-detection] Failed to ban ${message.author.tag}:`, banErr.message);
-        }
-
-        return; // don't run anything else on this message
-      }
-    }
   } catch (err) {
     console.error('[activity] Error handling message activity:', err.message);
   }

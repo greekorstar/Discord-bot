@@ -5,21 +5,6 @@
 module.exports = {
   inactivityTimeoutMinutes: 10,
 
-  // Scam detection — flags likely fake-Nitro/gift-link spam and bans the sender.
-  scamDetection: {
-    enabled: true,
-    newAccountDays: 7,             // accounts newer than this posting a link get flagged
-    rapidMessageWindowSeconds: 5,  // window for the rapid-fire spam check
-    rapidMessageThreshold: 3,      // this many links/images within the window = flagged
-
-    // Edit this whenever you're ready — {serverName} is replaced automatically.
-    banDmMessage: 'You have been banned from {serverName} for posting content that looked like a scam (e.g. a fake Nitro or gift link).',
-
-    // Leave blank for now. Once you have an appeal server, put its invite link here
-    // (e.g. "https://discord.gg/yourinvite") and it'll automatically be added to the DM.
-    appealServerInvite: '',
-  },
-
   // Ticket system — panel is posted via /ticket setup; a "ticket" style button
   // added manually through /embed create also opens the same flow.
   ticketSystem: {
