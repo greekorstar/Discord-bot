@@ -1,10 +1,9 @@
 // index.js — Main bot file
 require('dotenv').config();
-const { Client, GatewayIntentBits, Partials, REST, Routes, SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits, ButtonStyle, ActionRowBuilder, AttachmentBuilder, RoleSelectMenuBuilder } = require('discord.js');
+const { Client, GatewayIntentBits, Partials, REST, Routes, SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits, ButtonStyle } = require('discord.js');
 require('./keep_alive.js'); // Starts a tiny web server so UptimeRobot can ping this bot
 const { handleActivity } = require('./activityTracker.js');
 const roleManager = require('./roleManager.js');
-const roleExclusivity = require('./roleExclusivity.js');
 const embedBuilder = require('./embedBuilder.js');
 const buttonRegistry = require('./buttonRegistry.js');
 const scamDetector = require('./scamDetector.js');
@@ -18,6 +17,12 @@ const inviteTracker = require('./inviteTracker.js');
 const joinLeaveSystem = require('./joinLeaveSystem.js');
 const setupWizard = require('./setupWizard.js');
 const permissions = require('./permissions.js');
+const imageScamDetector = require('./imageScamDetector.js');
+const videoScamDetector = require('./videoScamDetector.js');
+const slurDetector = require('./slurDetector.js');
+const moderationLog = require('./moderationLog.js');
+const scamManagement = require('./scamManagement.js');
+const verificationSystem = require('./verificationSystem.js');
 
 const client = new Client({
   intents: [
@@ -64,23 +69,6 @@ const commands = [
   new SlashCommandBuilder()
     .setName('listactivityroles')
     .setDescription('List all configured activity role pairs (needs Manage Roles)'),
-
-  new SlashCommandBuilder()
-    .setName('roleexclusive')
-    .setDescription('Mutually-exclusive roles: gaining one automatically removes the other (needs Manage Roles)')
-    .addSubcommand(sub =>
-      sub.setName('add')
-        .setDescription('Make two roles mutually exclusive')
-        .addRoleOption(o => o.setName('role1').setDescription('First role').setRequired(true))
-        .addRoleOption(o => o.setName('role2').setDescription('Second role').setRequired(true)))
-    .addSubcommand(sub =>
-      sub.setName('remove')
-        .setDescription('Stop making two roles mutually exclusive')
-        .addRoleOption(o => o.setName('role1').setDescription('First role').setRequired(true))
-        .addRoleOption(o => o.setName('role2').setDescription('Second role').setRequired(true)))
-    .addSubcommand(sub =>
-      sub.setName('list')
-        .setDescription('View all configured mutually-exclusive role pairs')),
 
   new SlashCommandBuilder()
     .setName('embed')
@@ -201,6 +189,51 @@ const commands = [
         .addSubcommand(sub =>
           sub.setName('list')
             .setDescription('View everyone currently excluded from logging'))),
+
+  new SlashCommandBuilder()
+    .setName('scamlist')
+    .setDescription('Manage custom scam words and whitelisted links (needs Manage Server)')
+    .addSubcommandGroup(group =>
+      group.setName('word')
+        .setDescription('Manage custom scam words')
+        .addSubcommand(sub =>
+          sub.setName('add')
+            .setDescription('Add a custom scam phrase to detect')
+            .addStringOption(o => o.setName('phrase').setDescription('The phrase to detect').setRequired(true)))
+        .addSubcommand(sub =>
+          sub.setName('remove')
+            .setDescription('Remove a custom scam phrase')
+            .addStringOption(o => o.setName('phrase').setDescription('The phrase to remove').setRequired(true)))
+        .addSubcommand(sub =>
+          sub.setName('list')
+            .setDescription('List all custom scam phrases')))
+    .addSubcommandGroup(group =>
+      group.setName('whitelist')
+        .setDescription('Manage whitelisted links')
+        .addSubcommand(sub =>
+          sub.setName('add')
+            .setDescription('Whitelist a domain, optionally restricted to specific channels')
+            .addStringOption(o => o.setName('domain').setDescription('e.g. example.com').setRequired(true))
+            .addChannelOption(o => o.setName('channel1').setDescription('Restrict to this channel (optional)').setRequired(false))
+            .addChannelOption(o => o.setName('channel2').setDescription('...and this one (optional)').setRequired(false))
+            .addChannelOption(o => o.setName('channel3').setDescription('...and this one (optional)').setRequired(false)))
+        .addSubcommand(sub =>
+          sub.setName('remove')
+            .setDescription('Remove a whitelisted domain')
+            .addStringOption(o => o.setName('domain').setDescription('The domain to remove').setRequired(true)))
+        .addSubcommand(sub =>
+          sub.setName('list')
+            .setDescription('List all whitelisted links'))),
+
+  new SlashCommandBuilder()
+    .setName('verify')
+    .setDescription('Verification system (needs Manage Server)')
+    .addSubcommand(sub =>
+      sub.setName('setup')
+        .setDescription('Configure method, difficulty, and the verified role'))
+    .addSubcommand(sub =>
+      sub.setName('panel')
+        .setDescription('Post the verification panel in this channel')),
 ].map(command => command.toJSON());
 
 // ---- Register slash commands with Discord ----
@@ -287,43 +320,6 @@ client.on('interactionCreate', async interaction => {
       await interaction.reply({ embeds: [embed], ephemeral: true });
     }
 
-    else if (commandName === 'roleexclusive') {
-      if (!(await permissions.requirePermission(interaction, PermissionFlagsBits.ManageRoles, 'Manage Roles'))) return;
-      const subcommand = interaction.options.getSubcommand();
-
-      if (subcommand === 'add') {
-        const role1 = interaction.options.getRole('role1');
-        const role2 = interaction.options.getRole('role2');
-        if (role1.id === role2.id) { await interaction.reply({ content: "Those are the same role — pick two different roles.", ephemeral: true }); return; }
-        const added = roleExclusivity.addPair(role1.id, role2.id);
-        await interaction.reply(added
-          ? `✅ **${role1.name}** and **${role2.name}** are now mutually exclusive — gaining either one removes the other.`
-          : `That pair is already configured.`);
-      }
-
-      else if (subcommand === 'remove') {
-        const role1 = interaction.options.getRole('role1');
-        const role2 = interaction.options.getRole('role2');
-        const removed = roleExclusivity.removePair(role1.id, role2.id);
-        await interaction.reply(removed
-          ? `🗑️ Removed the exclusivity between **${role1.name}** and **${role2.name}**.`
-          : { content: `No exclusivity pair found between **${role1.name}** and **${role2.name}**.`, ephemeral: true });
-      }
-
-      else if (subcommand === 'list') {
-        const pairs = roleExclusivity.getPairs();
-        if (pairs.length === 0) {
-          await interaction.reply({ content: 'No mutually-exclusive role pairs configured yet.', ephemeral: true });
-          return;
-        }
-        const embed = new EmbedBuilder()
-          .setTitle('Mutually-Exclusive Role Pairs')
-          .setColor(0x5865F2)
-          .setDescription(pairs.map((p, i) => `**${i + 1}.** <@&${p.roleA}> ↔ <@&${p.roleB}>`).join('\n'));
-        await interaction.reply({ embeds: [embed], ephemeral: true });
-      }
-    }
-
     else if (commandName === 'embed') {
       if (!(await permissions.requirePermission(interaction, PermissionFlagsBits.ManageMessages, 'Manage Messages'))) return;
 
@@ -368,6 +364,7 @@ client.on('interactionCreate', async interaction => {
         });
       }
     }
+
     else if (commandName === 'setup') {
       if (!(await permissions.requirePermission(interaction, PermissionFlagsBits.ManageGuild, 'Manage Server'))) return;
 
@@ -519,6 +516,31 @@ client.on('interactionCreate', async interaction => {
       }
     }
 
+    else if (commandName === 'scamlist') {
+      if (!(await permissions.requirePermission(interaction, PermissionFlagsBits.ManageGuild, 'Manage Server'))) return;
+
+      const group = interaction.options.getSubcommandGroup();
+      const subcommand = interaction.options.getSubcommand();
+
+      if (group === 'word') {
+        if (subcommand === 'add') await scamManagement.handleAddWord(interaction);
+        else if (subcommand === 'remove') await scamManagement.handleRemoveWord(interaction);
+        else if (subcommand === 'list') await scamManagement.handleListWords(interaction);
+      } else if (group === 'whitelist') {
+        if (subcommand === 'add') await scamManagement.handleAddWhitelist(interaction);
+        else if (subcommand === 'remove') await scamManagement.handleRemoveWhitelist(interaction);
+        else if (subcommand === 'list') await scamManagement.handleListWhitelist(interaction);
+      }
+    }
+
+    else if (commandName === 'verify') {
+      if (!(await permissions.requirePermission(interaction, PermissionFlagsBits.ManageGuild, 'Manage Server'))) return;
+
+      const subcommand = interaction.options.getSubcommand();
+      if (subcommand === 'setup') await verificationSystem.handleSetupOverview(interaction);
+      else if (subcommand === 'panel') await verificationSystem.handlePostPanel(interaction);
+    }
+
   } catch (error) {
     console.error(`Error handling command ${commandName}:`, error);
     if (interaction.replied || interaction.deferred) {
@@ -540,18 +562,20 @@ client.on('interactionCreate', async interaction => {
 
     if (interaction.customId === 'embed_basics_modal') {
       const title = interaction.fields.getTextInputValue('title');
-      const url = interaction.fields.getTextInputValue('url');
       const description = interaction.fields.getTextInputValue('description');
       const colorInput = interaction.fields.getTextInputValue('color');
+      const footer = interaction.fields.getTextInputValue('footer');
+      const image = interaction.fields.getTextInputValue('image');
 
-      if (url && !embedBuilder.isValidHttpUrl(url)) {
-        await interaction.reply({ content: `⚠️ "${url}" isn't a valid title URL — nothing was saved. Try again.`, ephemeral: true });
+      if (image && !embedBuilder.isValidHttpUrl(image)) {
+        await interaction.reply({ content: `⚠️ "${image}" isn't a valid image URL (needs to start with http:// or https://) — nothing was saved. Try again.`, ephemeral: true });
         return;
       }
 
       data.title = title || undefined;
-      data.url = url || undefined;
       data.description = description || undefined;
+      data.footer = footer || undefined;
+      data.image = image || undefined;
 
       if (colorInput) {
         const parsed = embedBuilder.parseColor(colorInput);
@@ -563,39 +587,6 @@ client.on('interactionCreate', async interaction => {
       } else {
         data.color = undefined;
       }
-    }
-
-    else if (interaction.customId === 'embed_footer_modal') {
-      const text = interaction.fields.getTextInputValue('text');
-      const iconURL = interaction.fields.getTextInputValue('iconURL');
-      if (iconURL && !embedBuilder.isValidHttpUrl(iconURL)) {
-        await interaction.reply({ content: `⚠️ "${iconURL}" isn't a valid icon URL — nothing was saved. Try again.`, ephemeral: true });
-        return;
-      }
-      data.footer = text ? { text, iconURL: iconURL || undefined } : undefined;
-    }
-
-    else if (interaction.customId === 'embed_image_modal') {
-      const image = interaction.fields.getTextInputValue('image');
-      if (image && !embedBuilder.isValidHttpUrl(image)) {
-        await interaction.reply({ content: `⚠️ "${image}" isn't a valid image URL — nothing was saved. Try again.`, ephemeral: true });
-        return;
-      }
-      data.image = image || undefined;
-    }
-
-    else if (interaction.customId === 'embed_content_modal') {
-      session.content = interaction.fields.getTextInputValue('content') || '';
-    }
-
-    else if (interaction.customId === 'embed_importjson_modal') {
-      const jsonStr = interaction.fields.getTextInputValue('json');
-      const { data: parsedData, error } = embedBuilder.apiJsonToEmbedData(jsonStr);
-      if (error) {
-        await interaction.reply({ content: `⚠️ ${error}`, ephemeral: true });
-        return;
-      }
-      session.embeds[session.currentIndex] = parsedData;
     }
 
     else if (interaction.customId === 'embed_addfield_modal') {
@@ -627,6 +618,8 @@ client.on('interactionCreate', async interaction => {
         return;
       }
       const [removed] = session.buttons.splice(indexInput - 1, 1);
+      // Clean up its stored reply text too, unless it's a link button (no registry entry)
+      // or the fixed-purpose ticket_button shared elsewhere.
       if (removed.customId && removed.customId !== 'ticket_button') {
         buttonRegistry.deleteReply(removed.customId);
       }
@@ -658,52 +651,62 @@ client.on('interactionCreate', async interaction => {
       data.thumbnail = thumbnail || undefined;
     }
 
-    // ---- Button creation: final step (label/url/message/emoji), action+color+role already chosen ----
-    else if (interaction.customId.startsWith('embed_btn_final_modal_')) {
-      const rest = interaction.customId.replace('embed_btn_final_modal_', '');
-      // rest is one of: link_<Color> | ticket_<Color> | message_<Color> | <roleaction>_<Color>_<roleId>
-      const parts = rest.split('_');
-      const action = parts[0];
+    else if (interaction.customId === 'embed_addbutton_modal') {
       const label = interaction.fields.getTextInputValue('label');
-      const emoji = (() => { try { return interaction.fields.getTextInputValue('emoji'); } catch { return ''; } })();
+      const styleInput = interaction.fields.getTextInputValue('style').trim().toLowerCase();
+      const target = interaction.fields.getTextInputValue('target');
+      const replyText = interaction.fields.getTextInputValue('replyText');
+      const emoji = interaction.fields.getTextInputValue('emoji');
 
-      if (action === 'link') {
-        const color = parts[1];
-        const url = interaction.fields.getTextInputValue('url');
-        if (!embedBuilder.isValidHttpUrl(url)) {
-          await interaction.reply({ content: 'That URL needs to start with http:// or https://.', ephemeral: true });
+      const ROLE_ACTIONS = {
+        togglerole: { discordStyle: ButtonStyle.Primary, type: 'togglerole' },
+        addrole: { discordStyle: ButtonStyle.Success, type: 'addrole' },
+        giverole: { discordStyle: ButtonStyle.Success, type: 'addrole' }, // alias
+        removerole: { discordStyle: ButtonStyle.Danger, type: 'removerole' },
+      };
+
+      if (styleInput === 'ticket') {
+        session.buttons.push({ label, style: ButtonStyle.Success, customId: 'ticket_button', emoji: emoji || undefined });
+      }
+
+      else if (ROLE_ACTIONS[styleInput]) {
+        const role = embedBuilder.resolveRole(interaction.guild, target);
+        if (!role) {
+          await interaction.reply({ content: `⚠️ I couldn't find a role called "${target}" in this server. Type its exact name (with or without @), or paste its numeric ID / an actual @mention instead.`, ephemeral: true });
           return;
         }
-        session.buttons.push({ label, style: ButtonStyle.Link, url, emoji: emoji || undefined });
-      }
 
-      else if (action === 'ticket') {
-        const color = parts[1];
-        session.buttons.push({ label, style: ButtonStyle[color], customId: 'ticket_button', emoji: emoji || undefined });
-      }
-
-      else if (action === 'message') {
-        const color = parts[1];
-        const message = interaction.fields.getTextInputValue('message');
+        const action = ROLE_ACTIONS[styleInput];
         const customId = embedBuilder.genButtonId();
-        buttonRegistry.setConfig(customId, { type: 'message', text: message || 'This button has no reply text set.' });
-        session.buttons.push({ label, style: ButtonStyle[color], customId, emoji: emoji || undefined });
+        buttonRegistry.setConfig(customId, { type: action.type, roleId: role.id, text: replyText || undefined });
+        session.buttons.push({ label, style: action.discordStyle, customId, emoji: emoji || undefined });
       }
 
-      else if (['addrole', 'removerole', 'togglerole'].includes(action)) {
-        const roleId = parts[1];
-        const color = parts[2];
-        const message = (() => { try { return interaction.fields.getTextInputValue('message'); } catch { return ''; } })();
-        const customId = embedBuilder.genButtonId();
-        buttonRegistry.setConfig(customId, { type: action, roleId, text: message || undefined });
-        session.buttons.push({ label, style: ButtonStyle[color], customId, emoji: emoji || undefined });
+      else {
+        const style = embedBuilder.styleFromString(styleInput);
+        if (style === null) {
+          await interaction.reply({ content: `"${styleInput}" isn't a valid style/action. Use one of: link, primary, secondary, success, danger, ticket, togglerole, addrole, removerole.`, ephemeral: true });
+          return;
+        }
+
+        if (style === ButtonStyle.Link) {
+          if (!target || !embedBuilder.isValidHttpUrl(target)) {
+            await interaction.reply({ content: 'Link-style buttons need a valid http(s) URL.', ephemeral: true });
+            return;
+          }
+          session.buttons.push({ label, style, url: target, emoji: emoji || undefined });
+        } else {
+          const customId = embedBuilder.genButtonId();
+          buttonRegistry.setConfig(customId, { type: 'message', text: replyText || 'This button has no reply text set.' });
+          session.buttons.push({ label, style, customId, emoji: emoji || undefined });
+        }
       }
     }
 
     const embedPreview = embedBuilder.buildAllEmbeds(session);
     embedBuilder.persist();
     const replyPayload = {
-      content: embedBuilder.previewContent(session) + (session.content ? `\n**Message content:** ${session.content}` : ''),
+      content: embedBuilder.previewContent(session),
       embeds: embedPreview,
       components: embedBuilder.buildControlRows(session),
     };
@@ -725,105 +728,6 @@ client.on('interactionCreate', async interaction => {
   }
 });
 
-// ---- Embed builder: the "what do you want to edit?" dropdown + sub-menus ----
-client.on('interactionCreate', async interaction => {
-  if (!interaction.isStringSelectMenu()) return;
-  if (!interaction.customId.startsWith('embed_')) return;
-
-  try {
-    const session = embedBuilder.getSession(interaction.user.id);
-    const data = embedBuilder.currentEmbedData(session);
-
-    if (interaction.customId === 'embed_edit_menu') {
-      const choice = interaction.values[0];
-      if (choice === 'basics') { await interaction.showModal(embedBuilder.buildBasicsModal(data)); return; }
-      if (choice === 'footer') { await interaction.showModal(embedBuilder.buildFooterModal(data)); return; }
-      if (choice === 'image') { await interaction.showModal(embedBuilder.buildImageModal(data)); return; }
-      if (choice === 'thumbnail') { await interaction.showModal(embedBuilder.buildThumbnailModal(data)); return; }
-      if (choice === 'author') { await interaction.showModal(embedBuilder.buildAuthorModal(data)); return; }
-      if (choice === 'addfield') { await interaction.showModal(embedBuilder.buildFieldModal()); return; }
-      if (choice === 'removefield') { await interaction.showModal(embedBuilder.buildRemoveFieldModal()); return; }
-      if (choice === 'content') { await interaction.showModal(embedBuilder.buildContentModal(session)); return; }
-      if (choice === 'importjson') { await interaction.showModal(embedBuilder.buildImportJsonModal()); return; }
-
-      if (choice === 'timestamp') {
-        data.timestamp = !data.timestamp;
-        embedBuilder.persist();
-        await interaction.update({
-          content: embedBuilder.previewContent(session) + (session.content ? `\n**Message content:** ${session.content}` : ''),
-          embeds: embedBuilder.buildAllEmbeds(session),
-          components: embedBuilder.buildControlRows(session),
-        });
-        return;
-      }
-
-      if (choice === 'quickcolor') {
-        await interaction.reply({ content: 'Pick a color:', components: [embedBuilder.buildColorPresetSelectRow()], ephemeral: true });
-        return;
-      }
-
-      if (choice === 'exportjson') {
-        const json = JSON.stringify(embedBuilder.embedDataToApiJson(data), null, 2);
-        if (json.length > 1900) {
-          const attachment = new AttachmentBuilder(Buffer.from(json, 'utf-8'), { name: 'embed.json' });
-          await interaction.reply({ content: 'Here you go:', files: [attachment], ephemeral: true });
-        } else {
-          await interaction.reply({ content: `\`\`\`json\n${json}\n\`\`\``, ephemeral: true });
-        }
-        return;
-      }
-    }
-
-    else if (interaction.customId === 'embed_quickcolor_select') {
-      const value = interaction.values[0];
-      data.color = value === 'RANDOM' ? embedBuilder.randomColor() : embedBuilder.parseColor(`#${value}`);
-      embedBuilder.persist();
-      await interaction.update({ content: `✅ Color set.`, embeds: [], components: [] });
-      return;
-    }
-
-    // ---- Button creation flow ----
-    else if (interaction.customId === 'embed_btn_action_select') {
-      const action = interaction.values[0];
-      if (action === 'link') { await interaction.reply({ content: 'Pick a color:', components: [embedBuilder.buildButtonColorSelectRow('link')], ephemeral: true }); return; }
-      if (action === 'ticket') { await interaction.reply({ content: 'Pick a color:', components: [embedBuilder.buildButtonColorSelectRow('ticket')], ephemeral: true }); return; }
-      if (action === 'message') { await interaction.reply({ content: 'Pick a color:', components: [embedBuilder.buildButtonColorSelectRow('message')], ephemeral: true }); return; }
-      // role actions need a role picked first
-      const row = new ActionRowBuilder().addComponents(new RoleSelectMenuBuilder().setCustomId(`embed_btn_role_select_${action}`).setPlaceholder('Which role?'));
-      await interaction.reply({ content: 'Pick the role:', components: [row], ephemeral: true });
-    }
-
-    else if (interaction.customId.startsWith('embed_btn_color_select_')) {
-      const suffix = interaction.customId.replace('embed_btn_color_select_', '');
-      const color = interaction.values[0];
-      await interaction.showModal(embedBuilder.buildButtonFinalModal(suffix.split('_')[0]).setCustomId(`embed_btn_final_modal_${suffix}_${color}`));
-    }
-
-  } catch (error) {
-    console.error('Error handling embed select menu:', error);
-    const errMsg = { content: 'Something went wrong. The embed may have an invalid URL somewhere, or the original message may have been deleted.', ephemeral: true };
-    if (interaction.replied || interaction.deferred) {
-      await interaction.followUp(errMsg);
-    } else {
-      await interaction.reply(errMsg);
-    }
-  }
-});
-
-// ---- Embed builder: role select (button creation, step 2 of role actions) ----
-client.on('interactionCreate', async interaction => {
-  if (!interaction.isRoleSelectMenu()) return;
-  if (!interaction.customId.startsWith('embed_btn_role_select_')) return;
-
-  try {
-    const action = interaction.customId.replace('embed_btn_role_select_', '');
-    const roleId = interaction.values[0];
-    await interaction.reply({ content: 'Pick a color:', components: [embedBuilder.buildButtonColorSelectRow(action, roleId)], ephemeral: true });
-  } catch (error) {
-    console.error('Error handling embed role select:', error);
-  }
-});
-
 // ---- Embed builder: button clicks ----
 client.on('interactionCreate', async interaction => {
   if (!interaction.isButton()) return;
@@ -832,12 +736,28 @@ client.on('interactionCreate', async interaction => {
   try {
     const session = embedBuilder.getSession(interaction.user.id);
 
-    if (interaction.customId === 'embed_managebuttons_button') {
-      await interaction.reply({ content: 'Manage this message\'s buttons:', components: embedBuilder.buildManageButtonsRows(session), ephemeral: true });
+    if (interaction.customId === 'embed_editbasics_button') {
+      await interaction.showModal(embedBuilder.buildBasicsModal(embedBuilder.currentEmbedData(session)));
+      return;
+    }
+    if (interaction.customId === 'embed_addfield_button') {
+      await interaction.showModal(embedBuilder.buildFieldModal());
+      return;
+    }
+    if (interaction.customId === 'embed_removefield_button') {
+      await interaction.showModal(embedBuilder.buildRemoveFieldModal());
+      return;
+    }
+    if (interaction.customId === 'embed_author_button') {
+      await interaction.showModal(embedBuilder.buildAuthorModal());
+      return;
+    }
+    if (interaction.customId === 'embed_thumbnail_button') {
+      await interaction.showModal(embedBuilder.buildThumbnailModal());
       return;
     }
     if (interaction.customId === 'embed_addbutton_button') {
-      await interaction.reply({ content: 'What should this button do?', components: [embedBuilder.buildButtonActionSelectRow()], ephemeral: true });
+      await interaction.showModal(embedBuilder.buildAddButtonModal());
       return;
     }
     if (interaction.customId === 'embed_removebutton_button') {
@@ -869,18 +789,17 @@ client.on('interactionCreate', async interaction => {
       const allEmbeds = embedBuilder.buildAllEmbeds(session);
       const buttonsRow = embedBuilder.buildButtonsRow(session);
       const componentsToSend = buttonsRow ? [buttonsRow] : [];
-      const contentToSend = session.content || undefined;
 
       if (session.editingMessageId) {
         const channel = await client.channels.fetch(session.editingChannelId);
         const message = await channel.messages.fetch(session.editingMessageId);
-        await message.edit({ content: contentToSend || '', embeds: allEmbeds, components: componentsToSend });
+        await message.edit({ embeds: allEmbeds, components: componentsToSend });
         embedBuilder.clearSession(interaction.user.id);
-        await interaction.update({ content: '✅ Changes saved!', embeds: [], components: [] });
+        await interaction.update({ content: '✅ Changes saved!', embeds: allEmbeds, components: [] });
       } else {
-        await interaction.channel.send({ content: contentToSend, embeds: allEmbeds, components: componentsToSend });
+        await interaction.channel.send({ embeds: allEmbeds, components: componentsToSend });
         embedBuilder.clearSession(interaction.user.id);
-        await interaction.update({ content: '✅ Sent!', embeds: [], components: [] });
+        await interaction.update({ content: '✅ Sent!', embeds: allEmbeds, components: [] });
       }
       return;
     }
@@ -894,7 +813,7 @@ client.on('interactionCreate', async interaction => {
     // Default: re-render the preview after a simple state change (new/prev/next/remove embed)
     embedBuilder.persist();
     await interaction.update({
-      content: embedBuilder.previewContent(session) + (session.content ? `\n**Message content:** ${session.content}` : ''),
+      content: embedBuilder.previewContent(session),
       embeds: embedBuilder.buildAllEmbeds(session),
       components: embedBuilder.buildControlRows(session),
     });
@@ -966,7 +885,8 @@ client.on('interactionCreate', async interaction => {
         'already-lacks': `You don't have the <@&${config.roleId}> role.`,
       };
 
-      await interaction.reply({ content: config.text || defaultMessages[outcome], ephemeral: true });
+      const confirmEmbed = new EmbedBuilder().setDescription(config.text || defaultMessages[outcome]).setColor(0x5865F2);
+      await interaction.reply({ embeds: [confirmEmbed], ephemeral: true });
       return;
     }
 
@@ -977,6 +897,44 @@ client.on('interactionCreate', async interaction => {
   } catch (error) {
     console.error('Error handling custom action button:', error);
     const errMsg = { content: "Something went wrong performing this button's action — I may be missing a needed permission (Manage Roles for role buttons, or View Channel/Send Messages for the target channel), or my role may be positioned below the role it's trying to change.", ephemeral: true };
+    if (interaction.replied || interaction.deferred) {
+      await interaction.followUp(errMsg);
+    } else {
+      await interaction.reply(errMsg);
+    }
+  }
+});
+
+// ---- Verification system ----
+client.on('interactionCreate', async interaction => {
+  try {
+    if (interaction.isButton() && interaction.customId === 'verify_start_button') {
+      await verificationSystem.handleVerifyStart(interaction);
+      return;
+    }
+    if (interaction.isButton() && interaction.customId === 'verify_captcha_answer_button') {
+      await verificationSystem.handleCaptchaAnswerButton(interaction);
+      return;
+    }
+    if (interaction.isModalSubmit() && interaction.customId === 'verify_captcha_modal') {
+      await verificationSystem.handleCaptchaModalSubmit(interaction);
+      return;
+    }
+    if (interaction.isButton() && interaction.customId.startsWith('verifysetup_method_')) {
+      await verificationSystem.handleSetupButton(interaction);
+      return;
+    }
+    if (interaction.isButton() && interaction.customId.startsWith('verifysetup_difficulty_')) {
+      await verificationSystem.handleSetupButton(interaction);
+      return;
+    }
+    if (interaction.isRoleSelectMenu() && interaction.customId === 'verifysetup_role') {
+      await verificationSystem.handleSetupRoleSelect(interaction);
+      return;
+    }
+  } catch (error) {
+    console.error('Error handling verification interaction:', error);
+    const errMsg = { content: 'Something went wrong with verification. Please try again or tell an admin.', ephemeral: true };
     if (interaction.replied || interaction.deferred) {
       await interaction.followUp(errMsg);
     } else {
@@ -1264,6 +1222,30 @@ client.on('messageCreate', async message => {
     // Scam detection — skip staff (Administrator or Manage Messages) so mods/admins are never auto-banned
     const isStaff = member && (member.permissions.has(PermissionFlagsBits.Administrator) || member.permissions.has(PermissionFlagsBits.ManageMessages));
     if (member && !isStaff) {
+
+      // --- Slur detection (soft/hard, bypass-resistant) ---
+      const slurResult = slurDetector.detect(message.content);
+      if (slurResult && slurResult.flagged) {
+        console.log(`[slur-detection] Flagged ${message.author.tag} (${slurResult.severity}): "${slurResult.matched}"`);
+        await message.delete().catch(() => {});
+
+        const action = slurResult.severity === 'hard' ? config.slurDetection.hardAction : config.slurDetection.softAction;
+        if (action === 'ban') {
+          await message.guild.members.ban(message.author.id, { reason: `Auto-ban: ${slurResult.severity} slur detected` }).catch(err => console.error('[slur-detection] Ban failed:', err.message));
+        } else {
+          await member.timeout(config.slurDetection.softMuteMinutes * 60 * 1000, `Auto-mute: ${slurResult.severity} slur detected`).catch(err => console.error('[slur-detection] Mute failed:', err.message));
+        }
+
+        await moderationLog.postBlockLog(message.guild, {
+          user: message.author,
+          reason: `${slurResult.severity} slur detected (${action === 'ban' ? 'banned' : 'muted'})`,
+          category: 'Slur detection',
+          messageContent: message.content,
+        });
+        return;
+      }
+
+      // --- Text-based scam detection (links, keywords, rapid-fire, malware attachments) ---
       const result = scamDetector.checkMessage(message);
       if (result && result.flagged) {
         console.log(`[scam-detection] Flagged ${message.author.tag}: ${result.reason}`);
@@ -1288,7 +1270,42 @@ client.on('messageCreate', async message => {
           console.error(`[scam-detection] Failed to ban ${message.author.tag}:`, banErr.message);
         }
 
+        await moderationLog.postBlockLog(message.guild, {
+          user: message.author, reason: result.reason, category: 'Scam detection (text)', messageContent: message.content,
+        });
+
         return; // don't run anything else on this message
+      }
+
+      // --- Image/video OCR scam detection ---
+      for (const attachment of message.attachments.values()) {
+        const imageResult = await imageScamDetector.checkImageAttachment(attachment, message.channel.id).catch(err => {
+          console.error('[imageScamDetector] Error:', err.message);
+          return null;
+        });
+        if (imageResult && imageResult.flagged) {
+          console.log(`[image-scam-detection] Flagged ${message.author.tag}: ${imageResult.reason}`);
+          await message.delete().catch(() => {});
+          await message.guild.members.ban(message.author.id, { reason: `Auto-ban: ${imageResult.reason}` }).catch(err => console.error('[image-scam-detection] Ban failed:', err.message));
+          await moderationLog.postBlockLog(message.guild, {
+            user: message.author, reason: imageResult.reason, category: 'Scam/slur detection (image)', imageUrl: attachment.url,
+          });
+          return;
+        }
+
+        const videoResult = await videoScamDetector.checkVideoAttachment(attachment, message.channel.id).catch(err => {
+          console.error('[videoScamDetector] Error:', err.message);
+          return null;
+        });
+        if (videoResult && videoResult.flagged) {
+          console.log(`[video-scam-detection] Flagged ${message.author.tag}: ${videoResult.reason}`);
+          await message.delete().catch(() => {});
+          await message.guild.members.ban(message.author.id, { reason: `Auto-ban: ${videoResult.reason}` }).catch(err => console.error('[video-scam-detection] Ban failed:', err.message));
+          await moderationLog.postBlockLog(message.guild, {
+            user: message.author, reason: videoResult.reason, category: 'Scam/slur detection (video)', imageUrl: attachment.url,
+          });
+          return;
+        }
       }
     }
   } catch (err) {
@@ -1313,11 +1330,6 @@ client.on('messageReactionAdd', async (reaction, user) => {
   } catch (err) {
     console.error('[activity] Error handling reaction activity:', err.message);
   }
-});
-
-// ---- Mutually-exclusive roles ----
-client.on('guildMemberUpdate', (oldMember, newMember) => {
-  roleExclusivity.handleMemberUpdate(oldMember, newMember).catch(err => console.error('[roleExclusivity] Failed to handle member update:', err.message));
 });
 
 client.login(process.env.DISCORD_TOKEN);
