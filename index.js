@@ -17,11 +17,6 @@ const inviteTracker = require('./inviteTracker.js');
 const joinLeaveSystem = require('./joinLeaveSystem.js');
 const setupWizard = require('./setupWizard.js');
 const permissions = require('./permissions.js');
-const imageScamDetector = require('./imageScamDetector.js');
-const videoScamDetector = require('./videoScamDetector.js');
-const slurDetector = require('./slurDetector.js');
-const moderationLog = require('./moderationLog.js');
-const scamManagement = require('./scamManagement.js');
 const verificationSystem = require('./verificationSystem.js');
 
 const client = new Client({
@@ -189,41 +184,6 @@ const commands = [
         .addSubcommand(sub =>
           sub.setName('list')
             .setDescription('View everyone currently excluded from logging'))),
-
-  new SlashCommandBuilder()
-    .setName('scamlist')
-    .setDescription('Manage custom scam words and whitelisted links (needs Manage Server)')
-    .addSubcommandGroup(group =>
-      group.setName('word')
-        .setDescription('Manage custom scam words')
-        .addSubcommand(sub =>
-          sub.setName('add')
-            .setDescription('Add a custom scam phrase to detect')
-            .addStringOption(o => o.setName('phrase').setDescription('The phrase to detect').setRequired(true)))
-        .addSubcommand(sub =>
-          sub.setName('remove')
-            .setDescription('Remove a custom scam phrase')
-            .addStringOption(o => o.setName('phrase').setDescription('The phrase to remove').setRequired(true)))
-        .addSubcommand(sub =>
-          sub.setName('list')
-            .setDescription('List all custom scam phrases')))
-    .addSubcommandGroup(group =>
-      group.setName('whitelist')
-        .setDescription('Manage whitelisted links')
-        .addSubcommand(sub =>
-          sub.setName('add')
-            .setDescription('Whitelist a domain, optionally restricted to specific channels')
-            .addStringOption(o => o.setName('domain').setDescription('e.g. example.com').setRequired(true))
-            .addChannelOption(o => o.setName('channel1').setDescription('Restrict to this channel (optional)').setRequired(false))
-            .addChannelOption(o => o.setName('channel2').setDescription('...and this one (optional)').setRequired(false))
-            .addChannelOption(o => o.setName('channel3').setDescription('...and this one (optional)').setRequired(false)))
-        .addSubcommand(sub =>
-          sub.setName('remove')
-            .setDescription('Remove a whitelisted domain')
-            .addStringOption(o => o.setName('domain').setDescription('The domain to remove').setRequired(true)))
-        .addSubcommand(sub =>
-          sub.setName('list')
-            .setDescription('List all whitelisted links'))),
 
   new SlashCommandBuilder()
     .setName('verify')
@@ -513,23 +473,6 @@ client.on('interactionCreate', async interaction => {
           const list = ids.length > 0 ? ids.map(id => `<@${id}>`).join('\n') : '*(nobody else whitelisted)*';
           await interaction.reply({ content: `**Excluded from logging:**\n${ownerNote}\n${list}`, ephemeral: true });
         }
-      }
-    }
-
-    else if (commandName === 'scamlist') {
-      if (!(await permissions.requirePermission(interaction, PermissionFlagsBits.ManageGuild, 'Manage Server'))) return;
-
-      const group = interaction.options.getSubcommandGroup();
-      const subcommand = interaction.options.getSubcommand();
-
-      if (group === 'word') {
-        if (subcommand === 'add') await scamManagement.handleAddWord(interaction);
-        else if (subcommand === 'remove') await scamManagement.handleRemoveWord(interaction);
-        else if (subcommand === 'list') await scamManagement.handleListWords(interaction);
-      } else if (group === 'whitelist') {
-        if (subcommand === 'add') await scamManagement.handleAddWhitelist(interaction);
-        else if (subcommand === 'remove') await scamManagement.handleRemoveWhitelist(interaction);
-        else if (subcommand === 'list') await scamManagement.handleListWhitelist(interaction);
       }
     }
 
@@ -1222,30 +1165,6 @@ client.on('messageCreate', async message => {
     // Scam detection — skip staff (Administrator or Manage Messages) so mods/admins are never auto-banned
     const isStaff = member && (member.permissions.has(PermissionFlagsBits.Administrator) || member.permissions.has(PermissionFlagsBits.ManageMessages));
     if (member && !isStaff) {
-
-      // --- Slur detection (soft/hard, bypass-resistant) ---
-      const slurResult = slurDetector.detect(message.content);
-      if (slurResult && slurResult.flagged) {
-        console.log(`[slur-detection] Flagged ${message.author.tag} (${slurResult.severity}): "${slurResult.matched}"`);
-        await message.delete().catch(() => {});
-
-        const action = slurResult.severity === 'hard' ? config.slurDetection.hardAction : config.slurDetection.softAction;
-        if (action === 'ban') {
-          await message.guild.members.ban(message.author.id, { reason: `Auto-ban: ${slurResult.severity} slur detected` }).catch(err => console.error('[slur-detection] Ban failed:', err.message));
-        } else {
-          await member.timeout(config.slurDetection.softMuteMinutes * 60 * 1000, `Auto-mute: ${slurResult.severity} slur detected`).catch(err => console.error('[slur-detection] Mute failed:', err.message));
-        }
-
-        await moderationLog.postBlockLog(message.guild, {
-          user: message.author,
-          reason: `${slurResult.severity} slur detected (${action === 'ban' ? 'banned' : 'muted'})`,
-          category: 'Slur detection',
-          messageContent: message.content,
-        });
-        return;
-      }
-
-      // --- Text-based scam detection (links, keywords, rapid-fire, malware attachments) ---
       const result = scamDetector.checkMessage(message);
       if (result && result.flagged) {
         console.log(`[scam-detection] Flagged ${message.author.tag}: ${result.reason}`);
@@ -1270,42 +1189,7 @@ client.on('messageCreate', async message => {
           console.error(`[scam-detection] Failed to ban ${message.author.tag}:`, banErr.message);
         }
 
-        await moderationLog.postBlockLog(message.guild, {
-          user: message.author, reason: result.reason, category: 'Scam detection (text)', messageContent: message.content,
-        });
-
         return; // don't run anything else on this message
-      }
-
-      // --- Image/video OCR scam detection ---
-      for (const attachment of message.attachments.values()) {
-        const imageResult = await imageScamDetector.checkImageAttachment(attachment, message.channel.id).catch(err => {
-          console.error('[imageScamDetector] Error:', err.message);
-          return null;
-        });
-        if (imageResult && imageResult.flagged) {
-          console.log(`[image-scam-detection] Flagged ${message.author.tag}: ${imageResult.reason}`);
-          await message.delete().catch(() => {});
-          await message.guild.members.ban(message.author.id, { reason: `Auto-ban: ${imageResult.reason}` }).catch(err => console.error('[image-scam-detection] Ban failed:', err.message));
-          await moderationLog.postBlockLog(message.guild, {
-            user: message.author, reason: imageResult.reason, category: 'Scam/slur detection (image)', imageUrl: attachment.url,
-          });
-          return;
-        }
-
-        const videoResult = await videoScamDetector.checkVideoAttachment(attachment, message.channel.id).catch(err => {
-          console.error('[videoScamDetector] Error:', err.message);
-          return null;
-        });
-        if (videoResult && videoResult.flagged) {
-          console.log(`[video-scam-detection] Flagged ${message.author.tag}: ${videoResult.reason}`);
-          await message.delete().catch(() => {});
-          await message.guild.members.ban(message.author.id, { reason: `Auto-ban: ${videoResult.reason}` }).catch(err => console.error('[video-scam-detection] Ban failed:', err.message));
-          await moderationLog.postBlockLog(message.guild, {
-            user: message.author, reason: videoResult.reason, category: 'Scam/slur detection (video)', imageUrl: attachment.url,
-          });
-          return;
-        }
       }
     }
   } catch (err) {
