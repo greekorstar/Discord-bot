@@ -368,10 +368,15 @@ async function handleMessage(message) {
   }
 }
 
+function getSnipe(channelId) {
+  return snipeCache.get(channelId);
+}
+
 module.exports = {
   handleMessage,
   recordDeletedMessage,
   recordDeletedMessages,
   getPrefix,
   isChannelAllowed,
+  getSnipe,
 };

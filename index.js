@@ -1,6 +1,6 @@
 // index.js — Main bot file
 require('dotenv').config();
-const { Client, GatewayIntentBits, Partials, REST, Routes, SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits, ButtonStyle } = require('discord.js');
+const { Client, GatewayIntentBits, Partials, REST, Routes, SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits, ButtonStyle, ChannelType } = require('discord.js');
 require('./keep_alive.js'); // Starts a tiny web server so UptimeRobot can ping this bot
 const { handleActivity } = require('./activityTracker.js');
 const roleManager = require('./roleManager.js');
@@ -224,6 +224,58 @@ const commands = [
     .addSubcommand(sub =>
       sub.setName('panel')
         .setDescription('Post the verification panel in this channel')),
+
+  new SlashCommandBuilder()
+    .setName('purge')
+    .setDescription('Bulk-delete messages (needs Manage Messages)')
+    .addIntegerOption(o => o.setName('amount').setDescription('How many messages, 1-100').setRequired(true))
+    .addUserOption(o => o.setName('user').setDescription('Only delete messages from this user').setRequired(false)),
+
+  new SlashCommandBuilder()
+    .setName('snipe')
+    .setDescription('Show the last deleted message in this channel'),
+
+  new SlashCommandBuilder()
+    .setName('serverinfo')
+    .setDescription('Show detailed server information'),
+
+  new SlashCommandBuilder()
+    .setName('role')
+    .setDescription('Add or remove a role on a member (needs Manage Roles)')
+    .addStringOption(o => o.setName('action').setDescription('add or remove').setRequired(true)
+      .addChoices({ name: 'Add', value: 'add' }, { name: 'Remove', value: 'remove' }))
+    .addUserOption(o => o.setName('user').setDescription('Member to change').setRequired(true))
+    .addRoleOption(o => o.setName('role').setDescription('Role to add/remove').setRequired(true)),
+
+  new SlashCommandBuilder()
+    .setName('disable')
+    .setDescription('Toggle prefix commands off in a channel (needs Manage Server)')
+    .addChannelOption(o => o.setName('channel').setDescription('Defaults to this channel').setRequired(false)),
+
+  new SlashCommandBuilder()
+    .setName('enable')
+    .setDescription('Turn prefix commands back on in a channel (needs Manage Server)')
+    .addChannelOption(o => o.setName('channel').setDescription('Defaults to this channel').setRequired(false)),
+
+  new SlashCommandBuilder()
+    .setName('whitelist')
+    .setDescription('Restrict prefix commands to specific channels (needs Manage Server)')
+    .addSubcommand(sub => sub.setName('on').setDescription('Turn whitelist mode on'))
+    .addSubcommand(sub => sub.setName('off').setDescription('Turn whitelist mode off'))
+    .addSubcommand(sub => sub.setName('add').setDescription('Add a channel to the whitelist')
+      .addChannelOption(o => o.setName('channel').setDescription('Defaults to this channel').setRequired(false)))
+    .addSubcommand(sub => sub.setName('remove').setDescription('Remove a channel from the whitelist')
+      .addChannelOption(o => o.setName('channel').setDescription('Defaults to this channel').setRequired(false)))
+    .addSubcommand(sub => sub.setName('list').setDescription('List whitelisted channels')),
+
+  new SlashCommandBuilder()
+    .setName('setprefix')
+    .setDescription('Change the prefix (needs Manage Server)')
+    .addStringOption(o => o.setName('prefix').setDescription('New prefix, max 5 characters, no spaces').setRequired(true)),
+
+  new SlashCommandBuilder()
+    .setName('help')
+    .setDescription('List all commands'),
 ].map(command => command.toJSON());
 
 // ---- Register slash commands with Discord ----
@@ -547,6 +599,220 @@ async function runCommand(commandName, ctx) {
       const subcommand = ctx.options.getSubcommand();
       if (subcommand === 'setup') await verificationSystem.handleSetupOverview(ctx);
       else if (subcommand === 'panel') await verificationSystem.handlePostPanel(ctx);
+    }
+
+    else if (commandName === 'purge') {
+      if (!(await permissions.requirePermission(ctx, PermissionFlagsBits.ManageMessages, 'Manage Messages'))) return;
+
+      const amount = ctx.options.getInteger('amount');
+      const targetUser = ctx.options.getUser('user');
+
+      if (!amount || amount < 1 || amount > 100) {
+        await ctx.reply({ content: 'Amount must be between 1 and 100.', ephemeral: true });
+        return;
+      }
+
+      const fetched = await ctx.channel.messages.fetch({ limit: 100 }).catch(() => null);
+      if (!fetched) {
+        await ctx.reply({ content: '❌ Could not fetch messages to purge.', ephemeral: true });
+        return;
+      }
+
+      let toDelete = [...fetched.values()];
+      if (targetUser) toDelete = toDelete.filter(m => m.author.id === targetUser.id);
+      toDelete = toDelete.slice(0, amount);
+
+      if (toDelete.length === 0) {
+        await ctx.reply({ content: 'Nothing to delete.', ephemeral: true });
+        return;
+      }
+
+      prefixSystem.recordDeletedMessages(new Map(toDelete.map(m => [m.id, m])));
+      const deleted = await ctx.channel.bulkDelete(toDelete, true).catch(() => null);
+      const deletedCount = deleted ? deleted.size : 0;
+
+      await logSystem.logPurge(ctx.guild, ctx.channel, ctx.user, deletedCount, targetUser);
+      await ctx.reply({ content: `🧹 Deleted **${deletedCount}** message(s)${targetUser ? ` from **${targetUser.tag}**` : ''}.`, ephemeral: true });
+    }
+
+    else if (commandName === 'snipe') {
+      const sniped = prefixSystem.getSnipe(ctx.channel.id);
+      if (!sniped) {
+        await ctx.reply({ content: "There's nothing to snipe in this channel.", ephemeral: true });
+        return;
+      }
+
+      const embed = new EmbedBuilder()
+        .setAuthor({ name: sniped.authorTag, iconURL: sniped.avatarURL || undefined })
+        .setDescription(sniped.content || '*(no text content — attachment only)*')
+        .setColor(0xED4245)
+        .setFooter({ text: 'Deleted' })
+        .setTimestamp(sniped.timestamp);
+      if (sniped.attachmentUrl) embed.setImage(sniped.attachmentUrl);
+
+      await ctx.reply({ embeds: [embed] });
+    }
+
+    else if (commandName === 'serverinfo') {
+      const guild = ctx.guild;
+      await guild.members.fetch().catch(() => {});
+
+      const members = guild.members.cache;
+      const humanCount = members.filter(m => !m.user.bot).size;
+      const botCount = members.filter(m => m.user.bot).size;
+
+      const channels = guild.channels.cache;
+      const textCount = channels.filter(c => c.type === ChannelType.GuildText).size;
+      const voiceCount = channels.filter(c => c.type === ChannelType.GuildVoice).size;
+      const categoryCount = channels.filter(c => c.type === ChannelType.GuildCategory).size;
+
+      const owner = await guild.fetchOwner().catch(() => null);
+      const verificationLevels = { 0: 'None', 1: 'Low', 2: 'Medium', 3: 'High', 4: 'Very High' };
+
+      const embed = new EmbedBuilder()
+        .setTitle(`📊 ${guild.name}`)
+        .setThumbnail(guild.iconURL({ size: 256 }) || null)
+        .setColor(0x5865F2)
+        .addFields(
+          { name: 'Owner', value: owner ? `<@${owner.id}>` : 'Unknown', inline: true },
+          { name: 'Server ID', value: guild.id, inline: true },
+          { name: 'Created', value: `<t:${Math.floor(guild.createdTimestamp / 1000)}:D>`, inline: true },
+          { name: 'Members', value: `${guild.memberCount} total\n${humanCount} humans, ${botCount} bots`, inline: true },
+          { name: 'Channels', value: `${textCount} text, ${voiceCount} voice\n${categoryCount} categories`, inline: true },
+          { name: 'Roles', value: `${guild.roles.cache.size}`, inline: true },
+          { name: 'Boosts', value: `Level ${guild.premiumTier} (${guild.premiumSubscriptionCount || 0} boosts)`, inline: true },
+          { name: 'Verification', value: verificationLevels[guild.verificationLevel] ?? 'Unknown', inline: true },
+          { name: 'Emojis / Stickers', value: `${guild.emojis.cache.size} / ${guild.stickers.cache.size}`, inline: true },
+        )
+        .setFooter({ text: `Requested by ${ctx.user.tag || ctx.user.username}` })
+        .setTimestamp();
+
+      await ctx.reply({ embeds: [embed] });
+    }
+
+    else if (commandName === 'role') {
+      if (!(await permissions.requirePermission(ctx, PermissionFlagsBits.ManageRoles, 'Manage Roles'))) return;
+
+      const action = ctx.options.getString('action');
+      const targetUser = ctx.options.getUser('user');
+      const role = ctx.options.getRole('role');
+      const targetMember = await ctx.guild.members.fetch(targetUser.id).catch(() => null);
+
+      if (!targetMember) {
+        await ctx.reply({ content: 'Could not find that member in this server.', ephemeral: true });
+        return;
+      }
+
+      const me = ctx.guild.members.me;
+      if (role.position >= me.roles.highest.position) {
+        await ctx.reply({ content: `❌ I can't manage **${role.name}** — it's above (or equal to) my highest role.`, ephemeral: true });
+        return;
+      }
+      if (role.position >= ctx.member.roles.highest.position && ctx.guild.ownerId !== ctx.user.id) {
+        await ctx.reply({ content: `❌ You can't manage **${role.name}** — it's above (or equal to) your highest role.`, ephemeral: true });
+        return;
+      }
+
+      try {
+        if (action === 'add') {
+          await targetMember.roles.add(role);
+          await ctx.reply(`✅ Added **${role.name}** to <@${targetMember.id}>.`);
+        } else {
+          await targetMember.roles.remove(role);
+          await ctx.reply(`✅ Removed **${role.name}** from <@${targetMember.id}>.`);
+        }
+        await logSystem.logRoleChange(ctx.guild, ctx.user, targetMember, role, action);
+      } catch (err) {
+        await ctx.reply({ content: `❌ Failed to update roles: ${err.message}`, ephemeral: true });
+      }
+    }
+
+    else if (commandName === 'disable') {
+      if (!(await permissions.requirePermission(ctx, PermissionFlagsBits.ManageGuild, 'Manage Server'))) return;
+
+      const channel = ctx.options.getChannel('channel') || ctx.channel;
+      const disabled = settingsStore.get('disabledChannelIds', []);
+
+      let updated, nowDisabled;
+      if (disabled.includes(channel.id)) {
+        updated = disabled.filter(id => id !== channel.id);
+        nowDisabled = false;
+      } else {
+        updated = [...disabled, channel.id];
+        nowDisabled = true;
+      }
+      settingsStore.set('disabledChannelIds', updated);
+
+      await ctx.reply(nowDisabled ? `🔒 Prefix commands are now **disabled** in <#${channel.id}>.` : `🔓 Prefix commands are now **re-enabled** in <#${channel.id}>.`);
+    }
+
+    else if (commandName === 'enable') {
+      if (!(await permissions.requirePermission(ctx, PermissionFlagsBits.ManageGuild, 'Manage Server'))) return;
+
+      const channel = ctx.options.getChannel('channel') || ctx.channel;
+      const updated = settingsStore.get('disabledChannelIds', []).filter(id => id !== channel.id);
+      settingsStore.set('disabledChannelIds', updated);
+
+      await ctx.reply(`🔓 Prefix commands are **enabled** in <#${channel.id}> (if whitelist mode is on, it also needs to be whitelisted).`);
+    }
+
+    else if (commandName === 'whitelist') {
+      if (!(await permissions.requirePermission(ctx, PermissionFlagsBits.ManageGuild, 'Manage Server'))) return;
+
+      const subcommand = ctx.options.getSubcommand();
+
+      if (subcommand === 'on') {
+        settingsStore.set('whitelistModeEnabled', true);
+        await ctx.reply('✅ Whitelist mode is **ON** — prefix commands now only work in whitelisted channels.');
+      } else if (subcommand === 'off') {
+        settingsStore.set('whitelistModeEnabled', false);
+        await ctx.reply('✅ Whitelist mode is **OFF** — prefix commands now work everywhere except disabled channels.');
+      } else if (subcommand === 'add') {
+        const channel = ctx.options.getChannel('channel') || ctx.channel;
+        const list = settingsStore.get('whitelistedChannelIds', []);
+        if (!list.includes(channel.id)) settingsStore.set('whitelistedChannelIds', [...list, channel.id]);
+        await ctx.reply(`✅ <#${channel.id}> added to the whitelist.`);
+      } else if (subcommand === 'remove') {
+        const channel = ctx.options.getChannel('channel') || ctx.channel;
+        settingsStore.set('whitelistedChannelIds', settingsStore.get('whitelistedChannelIds', []).filter(id => id !== channel.id));
+        await ctx.reply(`✅ <#${channel.id}> removed from the whitelist.`);
+      } else if (subcommand === 'list') {
+        const list = settingsStore.get('whitelistedChannelIds', []);
+        const modeText = settingsStore.get('whitelistModeEnabled', false) ? 'ON' : 'OFF';
+        await ctx.reply(list.length ? `Whitelisted channels: ${list.map(id => `<#${id}>`).join(', ')}\nMode is **${modeText}**.` : `No channels whitelisted yet. Mode is **${modeText}**.`);
+      }
+    }
+
+    else if (commandName === 'setprefix') {
+      if (!(await permissions.requirePermission(ctx, PermissionFlagsBits.ManageGuild, 'Manage Server'))) return;
+
+      const newPrefix = ctx.options.getString('prefix');
+      if (!newPrefix || newPrefix.length > 5 || /\s/.test(newPrefix)) {
+        await ctx.reply({ content: 'Prefix must be non-empty, max 5 characters, and contain no spaces.', ephemeral: true });
+        return;
+      }
+      settingsStore.set('prefix', newPrefix);
+      await ctx.reply(`✅ Prefix changed to \`${newPrefix}\`. Example: \`${newPrefix}help\``);
+    }
+
+    else if (commandName === 'help') {
+      const prefix = prefixSystem.getPrefix();
+      const embed = new EmbedBuilder()
+        .setTitle('📖 Commands')
+        .setColor(0x5865F2)
+        .setDescription(
+          `Every command works as both a slash command and a prefix command — e.g. \`/kick\` or \`${prefix}kick\`.\n\n` +
+          `\`purge <amount> [user]\` — bulk-delete messages\n` +
+          `\`snipe\` — show the last deleted message here\n` +
+          `\`serverinfo\` — advanced server info\n` +
+          `\`role <add|remove> <user> <role>\` — manage a member's role\n` +
+          `\`disable [channel]\` — toggle commands off in a channel\n` +
+          `\`enable [channel]\` — turn commands back on in a channel\n` +
+          `\`whitelist <on|off|add|remove|list>\` — restrict commands to specific channels\n` +
+          `\`setprefix <prefix>\` — change the prefix\n\n` +
+          `Plus: \`kick\`, \`ban\`, \`unban\`, \`unmute\`, \`warn\`, \`level\`, \`embed\`, \`setup\`, \`ticket\`, \`verify\`, \`card\`, \`addactivityrole\`, \`removeactivityrole\`, \`listactivityroles\`, \`log\`, \`ping\`.`
+        );
+      await ctx.reply({ embeds: [embed] });
     }
 }
 
