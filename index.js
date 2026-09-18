@@ -18,6 +18,8 @@ const setupWizard = require('./setupWizard.js');
 const permissions = require('./permissions.js');
 const verificationSystem = require('./verificationSystem.js');
 const prefixSystem = require('./prefixSystem.js');
+const legacyPrefixBridge = require('./legacyPrefixBridge.js');
+const photoCard = require('./photoCard.js');
 
 const client = new Client({
   intents: [
@@ -165,6 +167,34 @@ const commands = [
     .addStringOption(o => o.setName('reason').setDescription('Reason').setRequired(false)),
 
   new SlashCommandBuilder()
+    .setName('unban')
+    .setDescription('Unban a user by ID')
+    .addStringOption(o => o.setName('user_id').setDescription('The ID of the user to unban').setRequired(true))
+    .addStringOption(o => o.setName('reason').setDescription('Reason').setRequired(false)),
+
+  new SlashCommandBuilder()
+    .setName('unmute')
+    .setDescription('Remove a member\'s timeout')
+    .addUserOption(o => o.setName('user').setDescription('Member to un-timeout').setRequired(true))
+    .addStringOption(o => o.setName('reason').setDescription('Reason').setRequired(false)),
+
+  new SlashCommandBuilder()
+    .setName('card')
+    .setDescription('Generate a themed photo card with your own text')
+    .addStringOption(o => o.setName('description').setDescription('The text to put on the card').setRequired(true))
+    .addStringOption(o => o.setName('theme').setDescription('Color theme').setRequired(false)
+      .addChoices(
+        { name: 'Blurple', value: 'blurple' },
+        { name: 'Green', value: 'green' },
+        { name: 'Red', value: 'red' },
+        { name: 'Gold', value: 'gold' },
+        { name: 'Purple', value: 'purple' },
+        { name: 'Teal', value: 'teal' },
+      ))
+    .addAttachmentOption(o => o.setName('image').setDescription('A picture to feature on the card (overrides the user avatar below)').setRequired(false))
+    .addUserOption(o => o.setName('user').setDescription('Whose avatar to feature if no image is attached — defaults to you').setRequired(false)),
+
+  new SlashCommandBuilder()
     .setName('log')
     .setDescription('General server log — logs command usage, message edits/deletes, bans, and more')
     .addSubcommand(sub =>
@@ -220,53 +250,46 @@ client.once('ready', () => {
   levelSystem.init(client);
 });
 
-// ---- Handle slash command interactions ----
-client.on('interactionCreate', async interaction => {
-  if (!interaction.isChatInputCommand()) return;
-
-  const { commandName } = interaction;
-
-  logSystem.logCommand(interaction).catch(err => console.error('[logSystem] Failed to log command usage:', err.message));
-
-  try {
+// ---- Shared command logic (used by both slash commands and legacy prefix commands) ----
+async function runCommand(commandName, ctx) {
     if (commandName === 'ping') {
-      const latency = Date.now() - interaction.createdTimestamp;
-      await interaction.reply({ content: `🏓 Pong! Latency: ${latency}ms | API Latency: ${Math.round(client.ws.ping)}ms`, ephemeral: true });
+      const latency = Date.now() - ctx.createdTimestamp;
+      await ctx.reply({ content: `🏓 Pong! Latency: ${latency}ms | API Latency: ${Math.round(client.ws.ping)}ms`, ephemeral: true });
     }
 
     else if (commandName === 'addactivityrole') {
-      if (!(await permissions.requirePermission(interaction, PermissionFlagsBits.ManageRoles, 'Manage Roles'))) return;
-      const requiredRole = interaction.options.getRole('required');
-      const activeRole = interaction.options.getRole('active');
-      const oldRequiredRole = interaction.options.getRole('old_required');
+      if (!(await permissions.requirePermission(ctx, PermissionFlagsBits.ManageRoles, 'Manage Roles'))) return;
+      const requiredRole = ctx.options.getRole('required');
+      const activeRole = ctx.options.getRole('active');
+      const oldRequiredRole = ctx.options.getRole('old_required');
 
       roleManager.addPair(requiredRole.id, activeRole.id, oldRequiredRole ? oldRequiredRole.id : undefined);
 
       if (oldRequiredRole) {
-        await interaction.reply(`✅ Updated that pair: now requires **${requiredRole.name}** to get **${activeRole.name}** while active (was **${oldRequiredRole.name}**).`);
+        await ctx.reply(`✅ Updated that pair: now requires **${requiredRole.name}** to get **${activeRole.name}** while active (was **${oldRequiredRole.name}**).`);
       } else {
-        await interaction.reply(`✅ Members with **${requiredRole.name}** will now get **${activeRole.name}** while active (10 min inactivity timeout).`);
+        await ctx.reply(`✅ Members with **${requiredRole.name}** will now get **${activeRole.name}** while active (10 min inactivity timeout).`);
       }
     }
 
     else if (commandName === 'removeactivityrole') {
-      if (!(await permissions.requirePermission(interaction, PermissionFlagsBits.ManageRoles, 'Manage Roles'))) return;
-      const requiredRole = interaction.options.getRole('required');
+      if (!(await permissions.requirePermission(ctx, PermissionFlagsBits.ManageRoles, 'Manage Roles'))) return;
+      const requiredRole = ctx.options.getRole('required');
       const removed = roleManager.removePair(requiredRole.id);
 
       if (removed) {
-        await interaction.reply(`🗑️ Removed the activity role pair for **${requiredRole.name}**.`);
+        await ctx.reply(`🗑️ Removed the activity role pair for **${requiredRole.name}**.`);
       } else {
-        await interaction.reply({ content: `No activity role pair found for **${requiredRole.name}**.`, ephemeral: true });
+        await ctx.reply({ content: `No activity role pair found for **${requiredRole.name}**.`, ephemeral: true });
       }
     }
 
     else if (commandName === 'listactivityroles') {
-      if (!(await permissions.requirePermission(interaction, PermissionFlagsBits.ManageRoles, 'Manage Roles'))) return;
+      if (!(await permissions.requirePermission(ctx, PermissionFlagsBits.ManageRoles, 'Manage Roles'))) return;
       const pairs = roleManager.getPairs();
 
       if (pairs.length === 0) {
-        await interaction.reply({ content: 'No activity role pairs are configured yet.', ephemeral: true });
+        await ctx.reply({ content: 'No activity role pairs are configured yet.', ephemeral: true });
         return;
       }
 
@@ -277,20 +300,20 @@ client.on('interactionCreate', async interaction => {
           pairs.map((p, i) => `**${i + 1}.** Required: <@&${p.requiredRoleId}> → Active: <@&${p.activeRoleId}>`).join('\n')
         );
 
-      await interaction.reply({ embeds: [embed], ephemeral: true });
+      await ctx.reply({ embeds: [embed], ephemeral: true });
     }
 
     else if (commandName === 'embed') {
-      if (!(await permissions.requirePermission(interaction, PermissionFlagsBits.ManageMessages, 'Manage Messages'))) return;
+      if (!(await permissions.requirePermission(ctx, PermissionFlagsBits.ManageMessages, 'Manage Messages'))) return;
 
-      const subcommand = interaction.options.getSubcommand();
+      const subcommand = ctx.options.getSubcommand();
 
       if (subcommand === 'create') {
-        embedBuilder.clearSession(interaction.user.id);
-        const session = embedBuilder.getSession(interaction.user.id);
+        embedBuilder.clearSession(ctx.user.id);
+        const session = embedBuilder.getSession(ctx.user.id);
         embedBuilder.persist();
 
-        await interaction.reply({
+        await ctx.reply({
           content: embedBuilder.previewContent(session),
           embeds: embedBuilder.buildAllEmbeds(session),
           components: embedBuilder.buildControlRows(session),
@@ -299,24 +322,24 @@ client.on('interactionCreate', async interaction => {
       }
 
       else if (subcommand === 'edit') {
-        const messageId = interaction.options.getString('message_id');
-        const message = await interaction.channel.messages.fetch(messageId).catch(() => null);
+        const messageId = ctx.options.getString('message_id');
+        const message = await ctx.channel.messages.fetch(messageId).catch(() => null);
 
         if (!message) {
-          await interaction.reply({ content: `Couldn't find a message with that ID in this channel.`, ephemeral: true });
+          await ctx.reply({ content: `Couldn't find a message with that ID in this channel.`, ephemeral: true });
           return;
         }
         if (message.author.id !== client.user.id) {
-          await interaction.reply({ content: `That message wasn't sent by me, so I can't edit it.`, ephemeral: true });
+          await ctx.reply({ content: `That message wasn't sent by me, so I can't edit it.`, ephemeral: true });
           return;
         }
 
-        embedBuilder.clearSession(interaction.user.id);
-        const session = embedBuilder.getSession(interaction.user.id);
+        embedBuilder.clearSession(ctx.user.id);
+        const session = embedBuilder.getSession(ctx.user.id);
         embedBuilder.loadMessageIntoSession(session, message);
         embedBuilder.persist();
 
-        await interaction.reply({
+        await ctx.reply({
           content: embedBuilder.previewContent(session),
           embeds: embedBuilder.buildAllEmbeds(session),
           components: embedBuilder.buildControlRows(session),
@@ -326,164 +349,248 @@ client.on('interactionCreate', async interaction => {
     }
 
     else if (commandName === 'setup') {
-      if (!(await permissions.requirePermission(interaction, PermissionFlagsBits.ManageGuild, 'Manage Server'))) return;
+      if (!(await permissions.requirePermission(ctx, PermissionFlagsBits.ManageGuild, 'Manage Server'))) return;
 
-      const subcommand = interaction.options.getSubcommand();
+      const subcommand = ctx.options.getSubcommand();
 
       if (subcommand === 'general') {
-        await interaction.reply({ content: 'Pick your join channel, leave channel, and auto-role(s) below. Each saves the moment you pick it.', components: setupWizard.buildGeneralSetupRows(), ephemeral: true });
+        await ctx.reply({ content: 'Pick your join channel, leave channel, and auto-role(s) below. Each saves the moment you pick it.', components: setupWizard.buildGeneralSetupRows(), ephemeral: true });
       }
     }
 
     else if (commandName === 'ticket') {
-      if (!(await permissions.requirePermission(interaction, PermissionFlagsBits.ManageGuild, 'Manage Server'))) return;
+      if (!(await permissions.requirePermission(ctx, PermissionFlagsBits.ManageGuild, 'Manage Server'))) return;
 
-      const subcommand = interaction.options.getSubcommand();
+      const subcommand = ctx.options.getSubcommand();
       if (subcommand === 'setup') {
-        await interaction.reply({ content: 'Pick your ticket panel channel, support role, category, and transcript channel below. Picking the panel channel immediately posts the "Open a Ticket" panel there.', components: ticketSystem.buildSetupRows(), ephemeral: true });
+        await ctx.reply({ content: 'Pick your ticket panel channel, support role, category, and transcript channel below. Picking the panel channel immediately posts the "Open a Ticket" panel there.', components: ticketSystem.buildSetupRows(), ephemeral: true });
       }
     }
 
     else if (commandName === 'level') {
-      const group = interaction.options.getSubcommandGroup(false);
-      const subcommand = interaction.options.getSubcommand();
+      const group = ctx.options.getSubcommandGroup(false);
+      const subcommand = ctx.options.getSubcommand();
 
       if (!group && subcommand === 'rank') {
-        const targetUser = interaction.options.getUser('user') || interaction.user;
-        const member = await interaction.guild.members.fetch(targetUser.id).catch(() => null);
-        if (!member) { await interaction.reply({ content: 'Could not find that member.', ephemeral: true }); return; }
+        const targetUser = ctx.options.getUser('user') || ctx.user;
+        const member = await ctx.guild.members.fetch(targetUser.id).catch(() => null);
+        if (!member) { await ctx.reply({ content: 'Could not find that member.', ephemeral: true }); return; }
         const payload = await levelSystem.buildRankCard(member);
-        await interaction.reply(payload);
+        await ctx.reply(payload);
       }
 
       else if (!group && subcommand === 'leaderboard') {
-        const type = interaction.options.getString('type') || 'overall';
-        const embed = levelSystem.buildLeaderboardEmbed(interaction.guild, type);
-        await interaction.reply({ embeds: [embed] });
+        const type = ctx.options.getString('type') || 'overall';
+        const embed = levelSystem.buildLeaderboardEmbed(ctx.guild, type);
+        await ctx.reply({ embeds: [embed] });
       }
 
       else if (!group && subcommand === 'setup') {
-        if (!(await permissions.requirePermission(interaction, PermissionFlagsBits.ManageGuild, 'Manage Server'))) return;
-        await interaction.reply({ content: 'What do you want to configure?', components: [levelSystem.buildSetupMenuRow()], ephemeral: true });
+        if (!(await permissions.requirePermission(ctx, PermissionFlagsBits.ManageGuild, 'Manage Server'))) return;
+        await ctx.reply({ content: 'What do you want to configure?', components: [levelSystem.buildSetupMenuRow()], ephemeral: true });
       }
 
       else if (group === 'admin') {
-        if (!(await permissions.requirePermission(interaction, PermissionFlagsBits.ManageGuild, 'Manage Server'))) return;
+        if (!(await permissions.requirePermission(ctx, PermissionFlagsBits.ManageGuild, 'Manage Server'))) return;
 
         if (subcommand === 'setxp') {
-          const user = interaction.options.getUser('user');
-          const mode = interaction.options.getString('mode');
-          const amount = interaction.options.getInteger('amount');
-          const { level } = levelSystem.adminSetXp(interaction.guild.id, user.id, mode, amount);
-          await interaction.reply({ content: `✅ Updated <@${user.id}>'s XP. They are now level ${level}.`, ephemeral: true });
+          const user = ctx.options.getUser('user');
+          const mode = ctx.options.getString('mode');
+          const amount = ctx.options.getInteger('amount');
+          const { level } = levelSystem.adminSetXp(ctx.guild.id, user.id, mode, amount);
+          await ctx.reply({ content: `✅ Updated <@${user.id}>'s XP. They are now level ${level}.`, ephemeral: true });
         } else if (subcommand === 'reset') {
-          const user = interaction.options.getUser('user');
-          levelSystem.resetUser(interaction.guild.id, user.id);
-          await interaction.reply({ content: `✅ Reset <@${user.id}>'s XP and level.`, ephemeral: true });
+          const user = ctx.options.getUser('user');
+          levelSystem.resetUser(ctx.guild.id, user.id);
+          await ctx.reply({ content: `✅ Reset <@${user.id}>'s XP and level.`, ephemeral: true });
         } else if (subcommand === 'resetall') {
-          levelSystem.resetGuild(interaction.guild.id);
-          await interaction.reply({ content: '✅ Reset the entire server\'s XP and levels.', ephemeral: true });
+          levelSystem.resetGuild(ctx.guild.id);
+          await ctx.reply({ content: '✅ Reset the entire server\'s XP and levels.', ephemeral: true });
         }
       }
     }
 
     else if (commandName === 'warn') {
-      const subcommand = interaction.options.getSubcommand();
+      const subcommand = ctx.options.getSubcommand();
 
       if (subcommand === 'add') {
-        if (!(await permissions.requirePermission(interaction, PermissionFlagsBits.ModerateMembers, 'Timeout Members'))) return;
-        const user = interaction.options.getUser('user');
-        const reason = interaction.options.getString('reason');
-        const member = await interaction.guild.members.fetch(user.id).catch(() => null);
-        if (!member) { await interaction.reply({ content: 'Could not find that member in this server.', ephemeral: true }); return; }
+        if (!(await permissions.requirePermission(ctx, PermissionFlagsBits.ModerateMembers, 'Timeout Members'))) return;
+        const user = ctx.options.getUser('user');
+        const reason = ctx.options.getString('reason');
+        const member = await ctx.guild.members.fetch(user.id).catch(() => null);
+        if (!member) { await ctx.reply({ content: 'Could not find that member in this server.', ephemeral: true }); return; }
 
-        const { count, escalationResult } = await warnSystem.addWarning(interaction.guild, member, interaction.user, reason);
-        await interaction.reply(`⚠️ <@${user.id}> has been warned (warning #${count}).${escalationResult ? ` They were automatically **${escalationResult}**.` : ''}`);
+        const { count, escalationResult } = await warnSystem.addWarning(ctx.guild, member, ctx.user, reason);
+        await ctx.reply(`⚠️ <@${user.id}> has been warned (warning #${count}).${escalationResult ? ` They were automatically **${escalationResult}**.` : ''}`);
       }
 
       else if (subcommand === 'list') {
-        if (!(await permissions.requirePermission(interaction, PermissionFlagsBits.ModerateMembers, 'Timeout Members'))) return;
-        const user = interaction.options.getUser('user');
-        const embed = warnSystem.buildWarningsEmbed(user, interaction.guild.id);
-        await interaction.reply({ embeds: [embed], ephemeral: true });
+        if (!(await permissions.requirePermission(ctx, PermissionFlagsBits.ModerateMembers, 'Timeout Members'))) return;
+        const user = ctx.options.getUser('user');
+        const embed = warnSystem.buildWarningsEmbed(user, ctx.guild.id);
+        await ctx.reply({ embeds: [embed], ephemeral: true });
       }
 
       else if (subcommand === 'clear') {
-        if (!(await permissions.requirePermission(interaction, PermissionFlagsBits.ModerateMembers, 'Timeout Members'))) return;
-        const user = interaction.options.getUser('user');
-        warnSystem.clearWarnings(interaction.guild.id, user.id);
-        await interaction.reply(`✅ Cleared all warnings for <@${user.id}>.`);
+        if (!(await permissions.requirePermission(ctx, PermissionFlagsBits.ModerateMembers, 'Timeout Members'))) return;
+        const user = ctx.options.getUser('user');
+        warnSystem.clearWarnings(ctx.guild.id, user.id);
+        await ctx.reply(`✅ Cleared all warnings for <@${user.id}>.`);
       }
 
       else if (subcommand === 'setup') {
-        if (!(await permissions.requirePermission(interaction, PermissionFlagsBits.ModerateMembers, 'Timeout Members'))) return;
-        const config = warnSystem.getConfig(interaction.guild.id);
-        await interaction.reply({ content: 'Pick your warning log channel below, and use the buttons to manage escalation rules (e.g. "2 warnings → kick").', components: warnSystem.buildSetupRows(config), ephemeral: true });
+        if (!(await permissions.requirePermission(ctx, PermissionFlagsBits.ModerateMembers, 'Timeout Members'))) return;
+        const config = warnSystem.getConfig(ctx.guild.id);
+        await ctx.reply({ content: 'Pick your warning log channel below, and use the buttons to manage escalation rules (e.g. "2 warnings → kick").', components: warnSystem.buildSetupRows(config), ephemeral: true });
       }
     }
 
     else if (commandName === 'kick') {
-      if (!(await permissions.requirePermission(interaction, PermissionFlagsBits.KickMembers, 'Kick Members'))) return;
-      const user = interaction.options.getUser('user');
-      const reason = interaction.options.getString('reason') || 'No reason provided';
-      const member = await interaction.guild.members.fetch(user.id).catch(() => null);
-      if (!member) { await interaction.reply({ content: 'Could not find that member in this server.', ephemeral: true }); return; }
-      if (!member.kickable) { await interaction.reply({ content: 'I can\'t kick that member — check my role position and permissions.', ephemeral: true }); return; }
+      if (!(await permissions.requirePermission(ctx, PermissionFlagsBits.KickMembers, 'Kick Members'))) return;
+      const user = ctx.options.getUser('user');
+      const reason = ctx.options.getString('reason') || 'No reason provided';
+      const member = await ctx.guild.members.fetch(user.id).catch(() => null);
+      if (!member) { await ctx.reply({ content: 'Could not find that member in this server.', ephemeral: true }); return; }
+      if (!member.kickable) { await ctx.reply({ content: 'I can\'t kick that member — check my role position and permissions.', ephemeral: true }); return; }
 
       await member.kick(reason);
-      await interaction.reply(`👢 <@${user.id}> was kicked. Reason: ${reason}`);
-      await logSystem.logAction(interaction.guild, `👢 <@${user.id}> was kicked by <@${interaction.user.id}>.\n**Reason:** ${reason}`);
+      await ctx.reply(`👢 <@${user.id}> was kicked. Reason: ${reason}`);
+      await logSystem.logAction(ctx.guild, `👢 <@${user.id}> was kicked by <@${ctx.user.id}>.\n**Reason:** ${reason}`);
     }
 
     else if (commandName === 'ban') {
-      if (!(await permissions.requirePermission(interaction, PermissionFlagsBits.BanMembers, 'Ban Members'))) return;
-      const user = interaction.options.getUser('user');
-      const reason = interaction.options.getString('reason') || 'No reason provided';
-      const member = await interaction.guild.members.fetch(user.id).catch(() => null);
-      if (member && !member.bannable) { await interaction.reply({ content: 'I can\'t ban that member — check my role position and permissions.', ephemeral: true }); return; }
+      if (!(await permissions.requirePermission(ctx, PermissionFlagsBits.BanMembers, 'Ban Members'))) return;
+      const user = ctx.options.getUser('user');
+      const reason = ctx.options.getString('reason') || 'No reason provided';
+      const member = await ctx.guild.members.fetch(user.id).catch(() => null);
+      if (member && !member.bannable) { await ctx.reply({ content: 'I can\'t ban that member — check my role position and permissions.', ephemeral: true }); return; }
 
-      await interaction.guild.members.ban(user.id, { reason });
-      await interaction.reply(`🔨 <@${user.id}> was banned. Reason: ${reason}`);
-      await logSystem.logAction(interaction.guild, `🔨 <@${user.id}> was banned by <@${interaction.user.id}>.\n**Reason:** ${reason}`);
+      await ctx.guild.members.ban(user.id, { reason });
+      await ctx.reply(`🔨 <@${user.id}> was banned. Reason: ${reason}`);
+      await logSystem.logAction(ctx.guild, `🔨 <@${user.id}> was banned by <@${ctx.user.id}>.\n**Reason:** ${reason}`);
+    }
+
+    else if (commandName === 'unban') {
+      if (!(await permissions.requirePermission(ctx, PermissionFlagsBits.BanMembers, 'Ban Members'))) return;
+      const userId = ctx.options.getString('user_id');
+      const reason = ctx.options.getString('reason') || 'No reason provided';
+
+      const bans = await ctx.guild.bans.fetch().catch(() => null);
+      if (!bans || !bans.has(userId)) { await ctx.reply({ content: 'That user isn\'t banned (or the ID is wrong).', ephemeral: true }); return; }
+
+      await ctx.guild.members.unban(userId, reason);
+      await ctx.reply(`🔓 <@${userId}> was unbanned. Reason: ${reason}`);
+      // guildBanRemove event logs this automatically with executor info
+    }
+
+    else if (commandName === 'unmute') {
+      if (!(await permissions.requirePermission(ctx, PermissionFlagsBits.ModerateMembers, 'Timeout Members'))) return;
+      const user = ctx.options.getUser('user');
+      const reason = ctx.options.getString('reason') || 'No reason provided';
+      const member = await ctx.guild.members.fetch(user.id).catch(() => null);
+      if (!member) { await ctx.reply({ content: 'Could not find that member in this server.', ephemeral: true }); return; }
+      if (!member.communicationDisabledUntilTimestamp) { await ctx.reply({ content: `<@${user.id}> isn't timed out.`, ephemeral: true }); return; }
+
+      await member.timeout(null, reason);
+      await ctx.reply(`🔊 <@${user.id}>'s timeout was removed. Reason: ${reason}`);
+      // guildMemberUpdate event logs this automatically
+    }
+
+    else if (commandName === 'card') {
+      const description = ctx.options.getString('description');
+      const theme = ctx.options.getString('theme') || 'blurple';
+      const attachment = ctx.options.getAttachment('image');
+      const avatarUser = ctx.options.getUser('user') || ctx.user;
+
+      const imageUrl = attachment?.url || avatarUser.displayAvatarURL({ extension: 'png', size: 256 });
+
+      try {
+        const file = await photoCard.buildCard({ theme, description, imageUrl, footerText: `Requested by ${ctx.user.tag || ctx.user.username}` });
+        await ctx.reply({ files: [file] });
+      } catch (err) {
+        await ctx.reply({ content: `❌ ${err.message}`, ephemeral: true });
+      }
     }
 
     else if (commandName === 'log') {
-      const group = interaction.options.getSubcommandGroup(false);
-      const subcommand = interaction.options.getSubcommand();
+      const group = ctx.options.getSubcommandGroup(false);
+      const subcommand = ctx.options.getSubcommand();
 
       if (!group && subcommand === 'setup') {
-        if (!(await permissions.requirePermission(interaction, PermissionFlagsBits.ManageGuild, 'Manage Server'))) return;
-        await interaction.reply({ content: 'Pick the channel everything gets logged to:', components: logSystem.buildSetupRows(), ephemeral: true });
+        if (!(await permissions.requirePermission(ctx, PermissionFlagsBits.ManageGuild, 'Manage Server'))) return;
+        await ctx.reply({ content: 'Pick the channel everything gets logged to:', components: logSystem.buildSetupRows(), ephemeral: true });
       }
 
       else if (group === 'whitelist') {
-        if (!(await permissions.requirePermission(interaction, PermissionFlagsBits.ManageGuild, 'Manage Server'))) return;
+        if (!(await permissions.requirePermission(ctx, PermissionFlagsBits.ManageGuild, 'Manage Server'))) return;
 
         if (subcommand === 'add') {
-          const user = interaction.options.getUser('user');
-          logSystem.addWhitelist(interaction.guild.id, user.id);
-          await interaction.reply({ content: `✅ <@${user.id}> will no longer be logged.`, ephemeral: true });
+          const user = ctx.options.getUser('user');
+          logSystem.addWhitelist(ctx.guild.id, user.id);
+          await ctx.reply({ content: `✅ <@${user.id}> will no longer be logged.`, ephemeral: true });
         } else if (subcommand === 'remove') {
-          const user = interaction.options.getUser('user');
-          logSystem.removeWhitelist(interaction.guild.id, user.id);
-          await interaction.reply({ content: `✅ <@${user.id}> will be logged again.`, ephemeral: true });
+          const user = ctx.options.getUser('user');
+          logSystem.removeWhitelist(ctx.guild.id, user.id);
+          await ctx.reply({ content: `✅ <@${user.id}> will be logged again.`, ephemeral: true });
         } else if (subcommand === 'list') {
-          const ids = logSystem.listWhitelist(interaction.guild.id);
-          const ownerNote = `<@${interaction.guild.ownerId}> (server owner — always excluded)`;
+          const ids = logSystem.listWhitelist(ctx.guild.id);
+          const ownerNote = `<@${ctx.guild.ownerId}> (server owner — always excluded)`;
           const list = ids.length > 0 ? ids.map(id => `<@${id}>`).join('\n') : '*(nobody else whitelisted)*';
-          await interaction.reply({ content: `**Excluded from logging:**\n${ownerNote}\n${list}`, ephemeral: true });
+          await ctx.reply({ content: `**Excluded from logging:**\n${ownerNote}\n${list}`, ephemeral: true });
         }
       }
     }
 
     else if (commandName === 'verify') {
-      if (!(await permissions.requirePermission(interaction, PermissionFlagsBits.ManageGuild, 'Manage Server'))) return;
+      if (!(await permissions.requirePermission(ctx, PermissionFlagsBits.ManageGuild, 'Manage Server'))) return;
 
-      const subcommand = interaction.options.getSubcommand();
-      if (subcommand === 'setup') await verificationSystem.handleSetupOverview(interaction);
-      else if (subcommand === 'panel') await verificationSystem.handlePostPanel(interaction);
+      const subcommand = ctx.options.getSubcommand();
+      if (subcommand === 'setup') await verificationSystem.handleSetupOverview(ctx);
+      else if (subcommand === 'panel') await verificationSystem.handlePostPanel(ctx);
     }
+}
 
+// ---- Legacy slash commands, also runnable as prefix commands (e.g. "!kick @user spamming") ----
+async function handleLegacyPrefixCommand(message) {
+  if (message.author.bot || !message.guild) return;
+
+  const prefix = prefixSystem.getPrefix();
+  if (!message.content.startsWith(prefix)) return;
+
+  const args = message.content.slice(prefix.length).trim().split(/\s+/);
+  const commandName = args.shift()?.toLowerCase();
+  if (!legacyPrefixBridge.LEGACY_COMMAND_NAMES.has(commandName)) return;
+
+  if (!prefixSystem.isChannelAllowed(message.channelId)) return;
+
+  const { options, error } = legacyPrefixBridge.parseLegacyCommand(message, commandName, args);
+  if (error) {
+    await message.reply(`Usage: \`${prefix}${error}\``);
+    return;
+  }
+
+  const ctx = legacyPrefixBridge.buildContext(message, options);
+
+  logSystem.logPrefixCommand(message, commandName, args.join(' ')).catch(err => console.error('[logSystem] Failed to log prefix command:', err.message));
+
+  try {
+    await runCommand(commandName, ctx);
+  } catch (error) {
+    console.error(`Error handling prefix command ${commandName}:`, error);
+    await message.reply('❌ Something went wrong running that command.').catch(() => {});
+  }
+}
+
+// ---- Handle slash command interactions ----
+client.on('interactionCreate', async interaction => {
+  if (!interaction.isChatInputCommand()) return;
+
+  const { commandName } = interaction;
+
+  logSystem.logCommand(interaction).catch(err => console.error('[logSystem] Failed to log command usage:', err.message));
+
+  try {
+    await runCommand(commandName, interaction);
   } catch (error) {
     console.error(`Error handling command ${commandName}:`, error);
     if (interaction.replied || interaction.deferred) {
@@ -493,6 +600,7 @@ client.on('interactionCreate', async interaction => {
     }
   }
 });
+
 
 // ---- Embed builder: modal submissions ----
 client.on('interactionCreate', async interaction => {
@@ -1013,6 +1121,13 @@ client.on('messageDeleteBulk', messages => prefixSystem.recordDeletedMessages(me
 client.on('messageUpdate', (oldMessage, newMessage) => logSystem.logMessageEdit(oldMessage, newMessage).catch(err => console.error('[logSystem] messageUpdate failed:', err.message)));
 client.on('guildBanAdd', ban => logSystem.logGuildBanAdd(ban).catch(err => console.error('[logSystem] guildBanAdd failed:', err.message)));
 client.on('guildBanRemove', ban => logSystem.logGuildBanRemove(ban).catch(err => console.error('[logSystem] guildBanRemove failed:', err.message)));
+client.on('channelCreate', channel => logSystem.logChannelCreate(channel).catch(err => console.error('[logSystem] channelCreate failed:', err.message)));
+client.on('channelDelete', channel => logSystem.logChannelDelete(channel).catch(err => console.error('[logSystem] channelDelete failed:', err.message)));
+client.on('roleCreate', role => logSystem.logRoleCreate(role).catch(err => console.error('[logSystem] roleCreate failed:', err.message)));
+client.on('roleDelete', role => logSystem.logRoleDelete(role).catch(err => console.error('[logSystem] roleDelete failed:', err.message)));
+client.on('roleUpdate', (oldRole, newRole) => logSystem.logRoleUpdate(oldRole, newRole).catch(err => console.error('[logSystem] roleUpdate failed:', err.message)));
+client.on('guildMemberUpdate', (oldMember, newMember) => logSystem.logMemberUpdate(oldMember, newMember).catch(err => console.error('[logSystem] guildMemberUpdate failed:', err.message)));
+client.on('voiceStateUpdate', (oldState, newState) => logSystem.logVoiceStateUpdate(oldState, newState).catch(err => console.error('[logSystem] voiceStateUpdate failed:', err.message)));
 
 // ---- Leveling system: setup menu, modals, selects, buttons ----
 client.on('interactionCreate', async interaction => {
@@ -1166,6 +1281,7 @@ client.on('messageCreate', async message => {
     await handleActivity(member);
     await levelSystem.handleMessageXp(message).catch(err => console.error('[levelSystem] message XP failed:', err.message));
     await prefixSystem.handleMessage(message).catch(err => console.error('[prefixSystem] Failed to handle prefix command:', err.message));
+    await handleLegacyPrefixCommand(message).catch(err => console.error('[legacyPrefixBridge] Failed to handle legacy prefix command:', err.message));
   } catch (err) {
     console.error('[activity] Error handling message activity:', err.message);
   }

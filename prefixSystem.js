@@ -325,7 +325,8 @@ async function cmdHelp(message) {
       `\`${prefix}disable [#channel]\` — toggle commands off in a channel\n` +
       `\`${prefix}enable [#channel]\` — turn commands back on in a channel\n` +
       `\`${prefix}whitelist on|off|add|remove|list\` — restrict commands to specific channels\n` +
-      `\`${prefix}setprefix <prefix>\` — change this prefix`
+      `\`${prefix}setprefix <prefix>\` — change this prefix\n\n` +
+      `**Every original slash command also works with this prefix** — e.g. \`${prefix}kick @user spamming\`, \`${prefix}unban 123456789012345678\`, \`${prefix}unmute @user\`, \`${prefix}warn add @user rude\`, \`${prefix}level rank\`, \`${prefix}embed create\`, \`${prefix}setup general\`, \`${prefix}verify panel\`, \`${prefix}card gold Big announcement here!\`, etc. Slash commands (\`/kick\`, \`/warn\`, ...) still work too.`
     );
   await message.reply({ embeds: [embed] });
 }
@@ -372,4 +373,5 @@ module.exports = {
   recordDeletedMessage,
   recordDeletedMessages,
   getPrefix,
+  isChannelAllowed,
 };
