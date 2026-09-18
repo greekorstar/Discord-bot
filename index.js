@@ -17,6 +17,8 @@ const joinLeaveSystem = require('./joinLeaveSystem.js');
 const setupWizard = require('./setupWizard.js');
 const permissions = require('./permissions.js');
 const verificationSystem = require('./verificationSystem.js');
+const durationParser = require('./durationParser.js');
+const tempBanScheduler = require('./tempBanScheduler.js');
 const prefixSystem = require('./prefixSystem.js');
 const legacyPrefixBridge = require('./legacyPrefixBridge.js');
 const photoCard = require('./photoCard.js');
@@ -158,25 +160,39 @@ const commands = [
     .setName('kick')
     .setDescription('Kick a member')
     .addUserOption(o => o.setName('user').setDescription('Member to kick').setRequired(true))
-    .addStringOption(o => o.setName('reason').setDescription('Reason').setRequired(false)),
+    .addStringOption(o => o.setName('reason').setDescription('Reason (required)').setRequired(true))
+    .addBooleanOption(o => o.setName('ephemeral').setDescription('Hide the confirmation from everyone but you').setRequired(false)),
 
   new SlashCommandBuilder()
     .setName('ban')
     .setDescription('Ban a member')
     .addUserOption(o => o.setName('user').setDescription('Member to ban').setRequired(true))
-    .addStringOption(o => o.setName('reason').setDescription('Reason').setRequired(false)),
+    .addStringOption(o => o.setName('reason').setDescription('Reason (required)').setRequired(true))
+    .addStringOption(o => o.setName('duration').setDescription('Temporary ban duration, e.g. 7d, 24h, 30m (leave blank for permanent)').setRequired(false))
+    .addIntegerOption(o => o.setName('delete_days').setDescription('Delete this many days of their recent messages (0-7)').setRequired(false))
+    .addBooleanOption(o => o.setName('ephemeral').setDescription('Hide the confirmation from everyone but you').setRequired(false)),
+
+  new SlashCommandBuilder()
+    .setName('mute')
+    .setDescription('Timeout a member directly (not via warning escalation)')
+    .addUserOption(o => o.setName('user').setDescription('Member to mute').setRequired(true))
+    .addStringOption(o => o.setName('duration').setDescription('e.g. 10m, 1h, 1d (max 28 days)').setRequired(true))
+    .addStringOption(o => o.setName('reason').setDescription('Reason (required)').setRequired(true))
+    .addBooleanOption(o => o.setName('ephemeral').setDescription('Hide the confirmation from everyone but you').setRequired(false)),
 
   new SlashCommandBuilder()
     .setName('unban')
     .setDescription('Unban a user by ID')
     .addStringOption(o => o.setName('user_id').setDescription('The ID of the user to unban').setRequired(true))
-    .addStringOption(o => o.setName('reason').setDescription('Reason').setRequired(false)),
+    .addStringOption(o => o.setName('reason').setDescription('Reason').setRequired(false))
+    .addBooleanOption(o => o.setName('ephemeral').setDescription('Hide the confirmation from everyone but you').setRequired(false)),
 
   new SlashCommandBuilder()
     .setName('unmute')
     .setDescription('Remove a member\'s timeout')
     .addUserOption(o => o.setName('user').setDescription('Member to un-timeout').setRequired(true))
-    .addStringOption(o => o.setName('reason').setDescription('Reason').setRequired(false)),
+    .addStringOption(o => o.setName('reason').setDescription('Reason').setRequired(false))
+    .addBooleanOption(o => o.setName('ephemeral').setDescription('Hide the confirmation from everyone but you').setRequired(false)),
 
   new SlashCommandBuilder()
     .setName('card')
@@ -229,7 +245,13 @@ const commands = [
     .setName('purge')
     .setDescription('Bulk-delete messages (needs Manage Messages)')
     .addIntegerOption(o => o.setName('amount').setDescription('How many messages, 1-100').setRequired(true))
-    .addUserOption(o => o.setName('user').setDescription('Only delete messages from this user').setRequired(false)),
+    .addUserOption(o => o.setName('user').setDescription('Only delete messages from this user').setRequired(false))
+    .addBooleanOption(o => o.setName('bots_only').setDescription('Only delete messages from bots').setRequired(false))
+    .addStringOption(o => o.setName('contains').setDescription('Only delete messages containing this text').setRequired(false))
+    .addBooleanOption(o => o.setName('has_link').setDescription('Only delete messages containing a link').setRequired(false))
+    .addBooleanOption(o => o.setName('has_attachment').setDescription('Only delete messages with an attachment/image').setRequired(false))
+    .addBooleanOption(o => o.setName('include_pinned').setDescription('Also delete pinned messages (default: pinned messages are protected)').setRequired(false))
+    .addBooleanOption(o => o.setName('ephemeral').setDescription('Hide the confirmation from everyone but you (still gets logged either way)').setRequired(false)),
 
   new SlashCommandBuilder()
     .setName('snipe')
@@ -300,6 +322,7 @@ client.once('ready', () => {
   registerCommands();
   client.guilds.cache.forEach(guild => inviteTracker.cacheGuildInvites(guild));
   levelSystem.init(client);
+  tempBanScheduler.init(client);
 });
 
 // ---- Shared command logic (used by both slash commands and legacy prefix commands) ----
@@ -501,12 +524,19 @@ async function runCommand(commandName, ctx) {
       if (!(await permissions.requirePermission(ctx, PermissionFlagsBits.KickMembers, 'Kick Members'))) return;
       const user = ctx.options.getUser('user');
       const reason = ctx.options.getString('reason') || 'No reason provided';
+      const ephemeral = ctx.options.getBoolean('ephemeral') || false;
       const member = await ctx.guild.members.fetch(user.id).catch(() => null);
       if (!member) { await ctx.reply({ content: 'Could not find that member in this server.', ephemeral: true }); return; }
       if (!member.kickable) { await ctx.reply({ content: 'I can\'t kick that member — check my role position and permissions.', ephemeral: true }); return; }
 
+      try {
+        await user.send(`You were kicked from **${ctx.guild.name}**.\n**Reason:** ${reason}`);
+      } catch (err) {
+        // DMs closed — proceed anyway
+      }
+
       await member.kick(reason);
-      await ctx.reply(`👢 <@${user.id}> was kicked. Reason: ${reason}`);
+      await ctx.reply({ content: `👢 <@${user.id}> was kicked. Reason: ${reason}`, ephemeral });
       await logSystem.logAction(ctx.guild, `👢 <@${user.id}> was kicked by <@${ctx.user.id}>.\n**Reason:** ${reason}`);
     }
 
@@ -514,24 +544,89 @@ async function runCommand(commandName, ctx) {
       if (!(await permissions.requirePermission(ctx, PermissionFlagsBits.BanMembers, 'Ban Members'))) return;
       const user = ctx.options.getUser('user');
       const reason = ctx.options.getString('reason') || 'No reason provided';
+      const durationInput = ctx.options.getString('duration');
+      const deleteDays = ctx.options.getInteger('delete_days');
+      const ephemeral = ctx.options.getBoolean('ephemeral') || false;
       const member = await ctx.guild.members.fetch(user.id).catch(() => null);
       if (member && !member.bannable) { await ctx.reply({ content: 'I can\'t ban that member — check my role position and permissions.', ephemeral: true }); return; }
 
-      await ctx.guild.members.ban(user.id, { reason });
-      await ctx.reply(`🔨 <@${user.id}> was banned. Reason: ${reason}`);
-      await logSystem.logAction(ctx.guild, `🔨 <@${user.id}> was banned by <@${ctx.user.id}>.\n**Reason:** ${reason}`);
+      let durationResult = null;
+      if (durationInput) {
+        durationResult = durationParser.parseDuration(durationInput);
+        if (!durationResult.valid) {
+          await ctx.reply({ content: `"${durationInput}" isn't a valid duration. Try something like "7d", "24h", or "30m".`, ephemeral: true });
+          return;
+        }
+      }
+
+      const clampedDeleteDays = deleteDays !== null ? Math.max(0, Math.min(7, deleteDays)) : 0;
+
+      try {
+        const durationNote = durationResult ? ` This ban expires in ${durationResult.display}.` : '';
+        await user.send(`You were banned from **${ctx.guild.name}**.\n**Reason:** ${reason}${durationNote}`);
+      } catch (err) {
+        // DMs closed — proceed anyway
+      }
+
+      await ctx.guild.members.ban(user.id, { reason, deleteMessageSeconds: clampedDeleteDays * 24 * 60 * 60 });
+
+      if (durationResult) {
+        tempBanScheduler.schedule(ctx.guild.id, user.id, durationResult.ms, reason);
+      }
+
+      const durationText = durationResult ? ` (temporary — ${durationResult.display})` : '';
+      await ctx.reply({ content: `🔨 <@${user.id}> was banned${durationText}. Reason: ${reason}`, ephemeral });
+      await logSystem.logAction(ctx.guild, `🔨 <@${user.id}> was banned by <@${ctx.user.id}>${durationText}.\n**Reason:** ${reason}`);
+    }
+
+    else if (commandName === 'mute') {
+      if (!(await permissions.requirePermission(ctx, PermissionFlagsBits.ModerateMembers, 'Timeout Members'))) return;
+      const user = ctx.options.getUser('user');
+      const durationInput = ctx.options.getString('duration');
+      const reason = ctx.options.getString('reason') || 'No reason provided';
+      const ephemeral = ctx.options.getBoolean('ephemeral') || false;
+      const member = await ctx.guild.members.fetch(user.id).catch(() => null);
+      if (!member) { await ctx.reply({ content: 'Could not find that member in this server.', ephemeral: true }); return; }
+
+      const durationResult = durationParser.parseDuration(durationInput);
+      if (!durationResult.valid) {
+        await ctx.reply({ content: `"${durationInput}" isn't a valid duration. Try something like "10m", "1h", or "1d".`, ephemeral: true });
+        return;
+      }
+      if (durationResult.ms > 28 * 24 * 60 * 60 * 1000) {
+        await ctx.reply({ content: 'Timeouts can\'t exceed 28 days — that\'s a Discord platform limit, not something this bot can raise.', ephemeral: true });
+        return;
+      }
+
+      try {
+        await member.timeout(durationResult.ms, reason);
+      } catch (err) {
+        await ctx.reply({ content: `❌ Couldn't mute that member: ${err.message}`, ephemeral: true });
+        return;
+      }
+
+      try {
+        await user.send(`You were muted in **${ctx.guild.name}** for ${durationResult.display}.\n**Reason:** ${reason}`);
+      } catch (err) {
+        // DMs closed — proceed anyway
+      }
+
+      await ctx.reply({ content: `🔇 <@${user.id}> was muted for ${durationResult.display}. Reason: ${reason}`, ephemeral });
+      await logSystem.logAction(ctx.guild, `🔇 <@${user.id}> was muted by <@${ctx.user.id}> for ${durationResult.display}.\n**Reason:** ${reason}`);
     }
 
     else if (commandName === 'unban') {
       if (!(await permissions.requirePermission(ctx, PermissionFlagsBits.BanMembers, 'Ban Members'))) return;
       const userId = ctx.options.getString('user_id');
       const reason = ctx.options.getString('reason') || 'No reason provided';
+      const ephemeral = ctx.options.getBoolean('ephemeral') || false;
 
       const bans = await ctx.guild.bans.fetch().catch(() => null);
       if (!bans || !bans.has(userId)) { await ctx.reply({ content: 'That user isn\'t banned (or the ID is wrong).', ephemeral: true }); return; }
 
       await ctx.guild.members.unban(userId, reason);
-      await ctx.reply(`🔓 <@${userId}> was unbanned. Reason: ${reason}`);
+      tempBanScheduler.cancel(ctx.guild.id, userId);
+      await ctx.reply({ content: `🔓 <@${userId}> was unbanned. Reason: ${reason}`, ephemeral });
       // guildBanRemove event logs this automatically with executor info
     }
 
@@ -539,12 +634,13 @@ async function runCommand(commandName, ctx) {
       if (!(await permissions.requirePermission(ctx, PermissionFlagsBits.ModerateMembers, 'Timeout Members'))) return;
       const user = ctx.options.getUser('user');
       const reason = ctx.options.getString('reason') || 'No reason provided';
+      const ephemeral = ctx.options.getBoolean('ephemeral') || false;
       const member = await ctx.guild.members.fetch(user.id).catch(() => null);
       if (!member) { await ctx.reply({ content: 'Could not find that member in this server.', ephemeral: true }); return; }
       if (!member.communicationDisabledUntilTimestamp) { await ctx.reply({ content: `<@${user.id}> isn't timed out.`, ephemeral: true }); return; }
 
       await member.timeout(null, reason);
-      await ctx.reply(`🔊 <@${user.id}>'s timeout was removed. Reason: ${reason}`);
+      await ctx.reply({ content: `🔊 <@${user.id}>'s timeout was removed. Reason: ${reason}`, ephemeral });
       // guildMemberUpdate event logs this automatically
     }
 
@@ -606,6 +702,12 @@ async function runCommand(commandName, ctx) {
 
       const amount = ctx.options.getInteger('amount');
       const targetUser = ctx.options.getUser('user');
+      const botsOnly = ctx.options.getBoolean('bots_only');
+      const containsText = ctx.options.getString('contains');
+      const hasLink = ctx.options.getBoolean('has_link');
+      const hasAttachment = ctx.options.getBoolean('has_attachment');
+      const includePinned = ctx.options.getBoolean('include_pinned') || false;
+      const ephemeral = ctx.options.getBoolean('ephemeral') || false;
 
       if (!amount || amount < 1 || amount > 100) {
         await ctx.reply({ content: 'Amount must be between 1 and 100.', ephemeral: true });
@@ -618,12 +720,20 @@ async function runCommand(commandName, ctx) {
         return;
       }
 
+      const linkPattern = /https?:\/\/\S+/i;
       let toDelete = [...fetched.values()];
+
       if (targetUser) toDelete = toDelete.filter(m => m.author.id === targetUser.id);
+      if (botsOnly) toDelete = toDelete.filter(m => m.author.bot);
+      if (containsText) toDelete = toDelete.filter(m => m.content.toLowerCase().includes(containsText.toLowerCase()));
+      if (hasLink) toDelete = toDelete.filter(m => linkPattern.test(m.content));
+      if (hasAttachment) toDelete = toDelete.filter(m => m.attachments.size > 0 || m.embeds.length > 0);
+      if (!includePinned) toDelete = toDelete.filter(m => !m.pinned);
+
       toDelete = toDelete.slice(0, amount);
 
       if (toDelete.length === 0) {
-        await ctx.reply({ content: 'Nothing to delete.', ephemeral: true });
+        await ctx.reply({ content: 'Nothing matched those filters.', ephemeral: true });
         return;
       }
 
@@ -631,8 +741,18 @@ async function runCommand(commandName, ctx) {
       const deleted = await ctx.channel.bulkDelete(toDelete, true).catch(() => null);
       const deletedCount = deleted ? deleted.size : 0;
 
+      // Logging always happens regardless of whether the confirmation reply is public or hidden.
       await logSystem.logPurge(ctx.guild, ctx.channel, ctx.user, deletedCount, targetUser);
-      await ctx.reply({ content: `🧹 Deleted **${deletedCount}** message(s)${targetUser ? ` from **${targetUser.tag}**` : ''}.`, ephemeral: true });
+
+      const filterNotes = [];
+      if (botsOnly) filterNotes.push('bots only');
+      if (containsText) filterNotes.push(`containing "${containsText}"`);
+      if (hasLink) filterNotes.push('with a link');
+      if (hasAttachment) filterNotes.push('with an attachment');
+      if (includePinned) filterNotes.push('including pinned');
+      const filterText = filterNotes.length > 0 ? ` (${filterNotes.join(', ')})` : '';
+
+      await ctx.reply({ content: `🧹 Deleted **${deletedCount}** message(s)${targetUser ? ` from **${targetUser.tag}**` : ''}${filterText}.`, ephemeral });
     }
 
     else if (commandName === 'snipe') {

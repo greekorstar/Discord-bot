@@ -12,7 +12,7 @@
 
 const LEGACY_COMMAND_NAMES = new Set([
   'ping', 'addactivityrole', 'removeactivityrole', 'listactivityroles',
-  'embed', 'setup', 'ticket', 'level', 'warn', 'kick', 'ban', 'unban', 'unmute',
+  'embed', 'setup', 'ticket', 'level', 'warn', 'kick', 'ban', 'mute', 'unban', 'unmute',
   'log', 'verify', 'card',
 ]);
 
@@ -26,8 +26,9 @@ const USAGE = {
   ticket: 'ticket setup',
   level: 'level rank [@user]  |  level leaderboard [overall|voice|reactions|weekly|monthly]  |  level setup  |  level admin setxp @user <set|add|remove> <amount>  |  level admin reset @user  |  level admin resetall',
   warn: 'warn add @user <reason>  |  warn list @user  |  warn clear @user  |  warn setup',
-  kick: 'kick @user [reason]',
-  ban: 'ban @user [reason]',
+  kick: 'kick @user <reason>',
+  ban: 'ban @user <reason> [duration, e.g. 7d]',
+  mute: 'mute @user <duration, e.g. 1h> <reason>',
   unban: 'unban <user_id> [reason]',
   unmute: 'unmute @user [reason]',
   log: 'log setup  |  log whitelist add @user  |  log whitelist remove @user  |  log whitelist list',
@@ -35,7 +36,7 @@ const USAGE = {
   card: 'card [theme: blurple|green|red|gold|purple|teal] <description> (optionally @mention someone or attach a picture)',
 };
 
-function makeOptions({ subcommand = null, subcommandGroup = null, users = {}, roles = {}, strings = {}, integers = {}, attachments = {} } = {}) {
+function makeOptions({ subcommand = null, subcommandGroup = null, users = {}, roles = {}, strings = {}, integers = {}, booleans = {}, attachments = {} } = {}) {
   return {
     getSubcommand: () => subcommand,
     getSubcommandGroup: () => subcommandGroup,
@@ -43,6 +44,7 @@ function makeOptions({ subcommand = null, subcommandGroup = null, users = {}, ro
     getRole: name => roles[name] || null,
     getString: name => (strings[name] !== undefined ? strings[name] : null),
     getInteger: name => (integers[name] !== undefined ? integers[name] : null),
+    getBoolean: name => (booleans[name] !== undefined ? booleans[name] : null),
     getAttachment: name => attachments[name] || null,
   };
 }
@@ -157,12 +159,35 @@ function parseLegacyCommand(message, commandName, args) {
       return { error: USAGE.warn };
     }
 
-    case 'kick':
+    case 'kick': {
+      const user = mentionUser();
+      if (!user) return { error: USAGE.kick };
+      const reason = stripMentionTokens(args).join(' ').trim();
+      if (!reason) return { error: USAGE.kick };
+      return { options: makeOptions({ users: { user }, strings: { reason } }) };
+    }
+
     case 'ban': {
       const user = mentionUser();
-      if (!user) return { error: USAGE[commandName] };
-      const reason = stripMentionTokens(args).join(' ').trim() || null;
-      return { options: makeOptions({ users: { user }, strings: { reason } }) };
+      if (!user) return { error: USAGE.ban };
+      const rest = stripMentionTokens(args);
+      let duration = null;
+      if (rest.length > 0 && /^\d+[a-z]+$/i.test(rest[0])) {
+        duration = rest.shift();
+      }
+      const reason = rest.join(' ').trim();
+      if (!reason) return { error: USAGE.ban };
+      return { options: makeOptions({ users: { user }, strings: { reason, duration } }) };
+    }
+
+    case 'mute': {
+      const user = mentionUser();
+      if (!user) return { error: USAGE.mute };
+      const rest = stripMentionTokens(args);
+      const duration = rest.shift();
+      const reason = rest.join(' ').trim();
+      if (!duration || !reason) return { error: USAGE.mute };
+      return { options: makeOptions({ users: { user }, strings: { duration, reason } }) };
     }
 
     case 'unban': {
