@@ -13,6 +13,7 @@
 const LEGACY_COMMAND_NAMES = new Set([
   'ping', 'addactivityrole', 'removeactivityrole', 'listactivityroles',
   'embed', 'setup', 'ticket', 'level', 'warn', 'kick', 'ban', 'mute', 'unban', 'unmute',
+  'softban', 'lock', 'unlock', 'slowmode', 'modlogs',
   'log', 'verify', 'card',
 ]);
 
@@ -31,12 +32,17 @@ const USAGE = {
   mute: 'mute @user <duration, e.g. 1h> <reason>',
   unban: 'unban <user_id> [reason]',
   unmute: 'unmute @user [reason]',
+  softban: 'softban @user <reason> [delete_days 0-7]',
+  lock: 'lock [#channel] [reason]',
+  unlock: 'unlock [#channel]',
+  slowmode: 'slowmode <seconds 0-21600> [#channel]',
+  modlogs: 'modlogs @user',
   log: 'log setup  |  log whitelist add @user  |  log whitelist remove @user  |  log whitelist list',
   verify: 'verify setup  |  verify panel',
   card: 'card [theme: blurple|green|red|gold|purple|teal] <description> (optionally @mention someone or attach a picture)',
 };
 
-function makeOptions({ subcommand = null, subcommandGroup = null, users = {}, roles = {}, strings = {}, integers = {}, booleans = {}, attachments = {} } = {}) {
+function makeOptions({ subcommand = null, subcommandGroup = null, users = {}, roles = {}, strings = {}, integers = {}, booleans = {}, attachments = {}, channels = {} } = {}) {
   return {
     getSubcommand: () => subcommand,
     getSubcommandGroup: () => subcommandGroup,
@@ -46,6 +52,7 @@ function makeOptions({ subcommand = null, subcommandGroup = null, users = {}, ro
     getInteger: name => (integers[name] !== undefined ? integers[name] : null),
     getBoolean: name => (booleans[name] !== undefined ? booleans[name] : null),
     getAttachment: name => attachments[name] || null,
+    getChannel: name => channels[name] || null,
   };
 }
 
@@ -202,6 +209,45 @@ function parseLegacyCommand(message, commandName, args) {
       if (!user) return { error: USAGE.unmute };
       const reason = stripMentionTokens(args).join(' ').trim() || null;
       return { options: makeOptions({ users: { user }, strings: { reason } }) };
+    }
+
+    case 'softban': {
+      const user = mentionUser();
+      if (!user) return { error: USAGE.softban };
+      const rest = stripMentionTokens(args);
+      let deleteDays = null;
+      const lastArg = rest[rest.length - 1];
+      if (lastArg && /^\d+$/.test(lastArg) && parseInt(lastArg, 10) <= 7) {
+        deleteDays = parseInt(rest.pop(), 10);
+      }
+      const reason = rest.join(' ').trim();
+      if (!reason) return { error: USAGE.softban };
+      return { options: makeOptions({ users: { user }, strings: { reason }, integers: { delete_days: deleteDays } }) };
+    }
+
+    case 'lock': {
+      const channel = message.mentions.channels.first() || null;
+      const rest = args.filter(a => !/^<#\d+>$/.test(a));
+      const reason = rest.join(' ').trim() || null;
+      return { options: makeOptions({ channels: { channel }, strings: { reason } }) };
+    }
+
+    case 'unlock': {
+      const channel = message.mentions.channels.first() || null;
+      return { options: makeOptions({ channels: { channel } }) };
+    }
+
+    case 'slowmode': {
+      const channel = message.mentions.channels.first() || null;
+      const secondsArg = args.find(a => /^\d+$/.test(a));
+      if (secondsArg === undefined) return { error: USAGE.slowmode };
+      return { options: makeOptions({ channels: { channel }, integers: { seconds: parseInt(secondsArg, 10) } }) };
+    }
+
+    case 'modlogs': {
+      const user = mentionUser();
+      if (!user) return { error: USAGE.modlogs };
+      return { options: makeOptions({ users: { user } }) };
     }
 
     case 'card': {

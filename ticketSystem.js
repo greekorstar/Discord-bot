@@ -158,14 +158,45 @@ async function handleSubmit(interaction, client) {
     .setColor(0x5865F2)
     .addFields(questions.map((q, i) => ({ name: q, value: answers[i] || '(no answer)' })));
 
-  const closeRow = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId(`ticket_close_${interaction.user.id}`).setLabel('Close Ticket').setStyle(ButtonStyle.Danger)
-  );
+  const claimButton = new ButtonBuilder().setCustomId(`ticket_claim_${interaction.user.id}`).setLabel('Claim').setStyle(ButtonStyle.Primary);
+  const closeButton = new ButtonBuilder().setCustomId(`ticket_close_${interaction.user.id}`).setLabel('Close Ticket').setStyle(ButtonStyle.Danger);
+  const actionRow = new ActionRowBuilder().addComponents(claimButton, closeButton);
 
   const pingText = supportRoleId ? `<@&${supportRoleId}> ` : '';
-  await channel.send({ content: `${pingText}<@${interaction.user.id}>`, embeds: [embed], components: [closeRow] });
+  await channel.send({ content: `${pingText}<@${interaction.user.id}>`, embeds: [embed], components: [actionRow] });
 
   await interaction.reply({ content: `✅ Ticket created: <#${channel.id}>`, ephemeral: true });
+}
+
+// Staff/support-role claim a ticket to signal they're handling it — prevents
+// two staff members duplicating work on the same ticket. One-time: the
+// button disables itself once claimed (re-claiming isn't offered; staff can
+// coordinate a handoff in the channel itself if needed).
+async function handleClaimButtonClick(interaction) {
+  const supportRoleId = settingsStore.get('ticketSupportRoleId', config.ticketSystem.supportRoleId);
+  const isStaff = interaction.memberPermissions.has(PermissionFlagsBits.Administrator) || interaction.memberPermissions.has(PermissionFlagsBits.ManageMessages);
+  const isSupport = supportRoleId ? interaction.member.roles.cache.has(supportRoleId) : false;
+
+  if (!isStaff && !isSupport) {
+    await interaction.reply({ content: 'Only staff or the support role can claim tickets.', ephemeral: true });
+    return;
+  }
+
+  const existingRow = interaction.message.components[0];
+  const claimComponent = existingRow?.components.find(c => c.customId === interaction.customId);
+  if (claimComponent?.disabled) {
+    await interaction.reply({ content: 'This ticket has already been claimed.', ephemeral: true });
+    return;
+  }
+
+  const openerId = interaction.customId.replace('ticket_claim_', '');
+  const embed = EmbedBuilder.from(interaction.message.embeds[0]).addFields({ name: 'Claimed by', value: `<@${interaction.user.id}>` });
+
+  const claimButton = new ButtonBuilder().setCustomId(interaction.customId).setLabel(`Claimed by ${interaction.user.username}`).setStyle(ButtonStyle.Secondary).setDisabled(true);
+  const closeButton = new ButtonBuilder().setCustomId(`ticket_close_${openerId}`).setLabel('Close Ticket').setStyle(ButtonStyle.Danger);
+  const row = new ActionRowBuilder().addComponents(claimButton, closeButton);
+
+  await interaction.update({ embeds: [embed], components: [row] });
 }
 
 // ---- Closing a ticket (now requires a reason) ----
@@ -281,6 +312,7 @@ module.exports = {
   handleSetupSelect,
   buildTicketModal,
   handleSubmit,
+  handleClaimButtonClick,
   handleCloseButtonClick,
   handleCloseReasonSubmit,
 };

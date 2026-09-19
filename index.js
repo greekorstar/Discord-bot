@@ -22,6 +22,7 @@ const tempBanScheduler = require('./tempBanScheduler.js');
 const prefixSystem = require('./prefixSystem.js');
 const legacyPrefixBridge = require('./legacyPrefixBridge.js');
 const photoCard = require('./photoCard.js');
+const modLogStore = require('./modLogStore.js');
 
 const client = new Client({
   intents: [
@@ -193,6 +194,36 @@ const commands = [
     .addUserOption(o => o.setName('user').setDescription('Member to un-timeout').setRequired(true))
     .addStringOption(o => o.setName('reason').setDescription('Reason').setRequired(false))
     .addBooleanOption(o => o.setName('ephemeral').setDescription('Hide the confirmation from everyone but you').setRequired(false)),
+
+  new SlashCommandBuilder()
+    .setName('softban')
+    .setDescription('Kick a member and purge their recent messages, without a lasting ban (needs Ban Members)')
+    .addUserOption(o => o.setName('user').setDescription('Member to softban').setRequired(true))
+    .addStringOption(o => o.setName('reason').setDescription('Reason').setRequired(false))
+    .addIntegerOption(o => o.setName('delete_days').setDescription('Days of messages to delete, 0-7 (default 1)').setRequired(false))
+    .addBooleanOption(o => o.setName('ephemeral').setDescription('Hide the confirmation from everyone but you').setRequired(false)),
+
+  new SlashCommandBuilder()
+    .setName('lock')
+    .setDescription('Stop @everyone from sending messages in a channel (needs Manage Channels)')
+    .addChannelOption(o => o.setName('channel').setDescription('Defaults to this channel').setRequired(false))
+    .addStringOption(o => o.setName('reason').setDescription('Reason').setRequired(false)),
+
+  new SlashCommandBuilder()
+    .setName('unlock')
+    .setDescription('Let @everyone send messages in a channel again (needs Manage Channels)')
+    .addChannelOption(o => o.setName('channel').setDescription('Defaults to this channel').setRequired(false)),
+
+  new SlashCommandBuilder()
+    .setName('slowmode')
+    .setDescription('Set a channel\'s slowmode delay (needs Manage Channels)')
+    .addIntegerOption(o => o.setName('seconds').setDescription('0 to turn off, up to 21600 (6 hours)').setRequired(true))
+    .addChannelOption(o => o.setName('channel').setDescription('Defaults to this channel').setRequired(false)),
+
+  new SlashCommandBuilder()
+    .setName('modlogs')
+    .setDescription('Show a member\'s combined moderation history (kicks, bans, mutes, warns, ...)')
+    .addUserOption(o => o.setName('user').setDescription('Member to look up').setRequired(true)),
 
   new SlashCommandBuilder()
     .setName('card')
@@ -496,6 +527,7 @@ async function runCommand(commandName, ctx) {
         if (!member) { await ctx.reply({ content: 'Could not find that member in this server.', ephemeral: true }); return; }
 
         const { count, escalationResult } = await warnSystem.addWarning(ctx.guild, member, ctx.user, reason);
+        modLogStore.addCase(ctx.guild.id, { type: 'warn', targetId: user.id, moderatorId: ctx.user.id, reason, extra: { warningNumber: count } });
         await ctx.reply(`⚠️ <@${user.id}> has been warned (warning #${count}).${escalationResult ? ` They were automatically **${escalationResult}**.` : ''}`);
       }
 
@@ -536,6 +568,7 @@ async function runCommand(commandName, ctx) {
       }
 
       await member.kick(reason);
+      modLogStore.addCase(ctx.guild.id, { type: 'kick', targetId: user.id, moderatorId: ctx.user.id, reason });
       await ctx.reply({ content: `👢 <@${user.id}> was kicked. Reason: ${reason}`, ephemeral });
       await logSystem.logAction(ctx.guild, `👢 <@${user.id}> was kicked by <@${ctx.user.id}>.\n**Reason:** ${reason}`);
     }
@@ -562,17 +595,24 @@ async function runCommand(commandName, ctx) {
       const clampedDeleteDays = deleteDays !== null ? Math.max(0, Math.min(7, deleteDays)) : 0;
 
       try {
+        await ctx.guild.members.ban(user.id, { reason, deleteMessageSeconds: clampedDeleteDays * 24 * 60 * 60 });
+      } catch (err) {
+        await ctx.reply({ content: `❌ Couldn't ban that user: ${err.message}`, ephemeral: true });
+        return;
+      }
+
+      try {
         const durationNote = durationResult ? ` This ban expires in ${durationResult.display}.` : '';
         await user.send(`You were banned from **${ctx.guild.name}**.\n**Reason:** ${reason}${durationNote}`);
       } catch (err) {
-        // DMs closed — proceed anyway
+        // DMs closed — proceed anyway (ban already succeeded)
       }
-
-      await ctx.guild.members.ban(user.id, { reason, deleteMessageSeconds: clampedDeleteDays * 24 * 60 * 60 });
 
       if (durationResult) {
         tempBanScheduler.schedule(ctx.guild.id, user.id, durationResult.ms, reason);
       }
+
+      modLogStore.addCase(ctx.guild.id, { type: 'ban', targetId: user.id, moderatorId: ctx.user.id, reason, extra: durationResult ? { durationDisplay: durationResult.display } : null });
 
       const durationText = durationResult ? ` (temporary — ${durationResult.display})` : '';
       await ctx.reply({ content: `🔨 <@${user.id}> was banned${durationText}. Reason: ${reason}`, ephemeral });
@@ -587,6 +627,7 @@ async function runCommand(commandName, ctx) {
       const ephemeral = ctx.options.getBoolean('ephemeral') || false;
       const member = await ctx.guild.members.fetch(user.id).catch(() => null);
       if (!member) { await ctx.reply({ content: 'Could not find that member in this server.', ephemeral: true }); return; }
+      if (!member.moderatable) { await ctx.reply({ content: 'I can\'t mute that member — check my role position and permissions.', ephemeral: true }); return; }
 
       const durationResult = durationParser.parseDuration(durationInput);
       if (!durationResult.valid) {
@@ -612,6 +653,7 @@ async function runCommand(commandName, ctx) {
       }
 
       await ctx.reply({ content: `🔇 <@${user.id}> was muted for ${durationResult.display}. Reason: ${reason}`, ephemeral });
+      modLogStore.addCase(ctx.guild.id, { type: 'mute', targetId: user.id, moderatorId: ctx.user.id, reason, extra: { durationDisplay: durationResult.display } });
       await logSystem.logAction(ctx.guild, `🔇 <@${user.id}> was muted by <@${ctx.user.id}> for ${durationResult.display}.\n**Reason:** ${reason}`);
     }
 
@@ -626,6 +668,7 @@ async function runCommand(commandName, ctx) {
 
       await ctx.guild.members.unban(userId, reason);
       tempBanScheduler.cancel(ctx.guild.id, userId);
+      modLogStore.addCase(ctx.guild.id, { type: 'unban', targetId: userId, moderatorId: ctx.user.id, reason });
       await ctx.reply({ content: `🔓 <@${userId}> was unbanned. Reason: ${reason}`, ephemeral });
       // guildBanRemove event logs this automatically with executor info
     }
@@ -640,8 +683,131 @@ async function runCommand(commandName, ctx) {
       if (!member.communicationDisabledUntilTimestamp) { await ctx.reply({ content: `<@${user.id}> isn't timed out.`, ephemeral: true }); return; }
 
       await member.timeout(null, reason);
+      modLogStore.addCase(ctx.guild.id, { type: 'unmute', targetId: user.id, moderatorId: ctx.user.id, reason });
       await ctx.reply({ content: `🔊 <@${user.id}>'s timeout was removed. Reason: ${reason}`, ephemeral });
       // guildMemberUpdate event logs this automatically
+    }
+
+    else if (commandName === 'softban') {
+      // Bans then immediately unbans — the net effect is "kick + purge their
+      // recent messages", without a lasting ban record. Useful for spam/raid
+      // cleanup where a permanent ban would be overkill.
+      if (!(await permissions.requirePermission(ctx, PermissionFlagsBits.BanMembers, 'Ban Members'))) return;
+      const user = ctx.options.getUser('user');
+      const reason = ctx.options.getString('reason') || 'No reason provided';
+      const deleteDays = ctx.options.getInteger('delete_days');
+      const ephemeral = ctx.options.getBoolean('ephemeral') || false;
+      const member = await ctx.guild.members.fetch(user.id).catch(() => null);
+      if (member && !member.bannable) { await ctx.reply({ content: 'I can\'t softban that member — check my role position and permissions.', ephemeral: true }); return; }
+
+      const clampedDeleteDays = deleteDays !== null ? Math.max(0, Math.min(7, deleteDays)) : 1;
+
+      try {
+        await ctx.guild.members.ban(user.id, { reason: `[Softban] ${reason}`, deleteMessageSeconds: clampedDeleteDays * 24 * 60 * 60 });
+      } catch (err) {
+        await ctx.reply({ content: `❌ Couldn't softban that user: ${err.message}`, ephemeral: true });
+        return;
+      }
+
+      try {
+        await ctx.guild.members.unban(user.id, 'Softban — auto-unban after message purge');
+      } catch (err) {
+        console.error('[softban] Ban succeeded but auto-unban failed:', err.message);
+      }
+
+      try {
+        await user.send(`You were softbanned from **${ctx.guild.name}** — your recent messages were purged, but you're free to rejoin.\n**Reason:** ${reason}`);
+      } catch (err) {
+        // DMs closed — proceed anyway
+      }
+
+      modLogStore.addCase(ctx.guild.id, { type: 'softban', targetId: user.id, moderatorId: ctx.user.id, reason });
+      await ctx.reply({ content: `🧹 <@${user.id}> was softbanned (kicked + messages purged). Reason: ${reason}`, ephemeral });
+      await logSystem.logAction(ctx.guild, `🧹 <@${user.id}> was softbanned by <@${ctx.user.id}>.\n**Reason:** ${reason}`);
+    }
+
+    else if (commandName === 'lock') {
+      if (!(await permissions.requirePermission(ctx, PermissionFlagsBits.ManageChannels, 'Manage Channels'))) return;
+      const channel = ctx.options.getChannel('channel') || ctx.channel;
+      const reason = ctx.options.getString('reason') || 'No reason provided';
+
+      try {
+        await channel.permissionOverwrites.edit(ctx.guild.roles.everyone, { SendMessages: false }, { reason });
+      } catch (err) {
+        await ctx.reply({ content: `❌ Couldn't lock that channel: ${err.message}`, ephemeral: true });
+        return;
+      }
+
+      modLogStore.addCase(ctx.guild.id, { type: 'lock', targetId: channel.id, moderatorId: ctx.user.id, reason });
+      await ctx.reply(`🔒 <#${channel.id}> is now locked — @everyone can't send messages. Reason: ${reason}`);
+      await logSystem.logAction(ctx.guild, `🔒 <#${channel.id}> was locked by <@${ctx.user.id}>.\n**Reason:** ${reason}`);
+    }
+
+    else if (commandName === 'unlock') {
+      if (!(await permissions.requirePermission(ctx, PermissionFlagsBits.ManageChannels, 'Manage Channels'))) return;
+      const channel = ctx.options.getChannel('channel') || ctx.channel;
+
+      try {
+        await channel.permissionOverwrites.edit(ctx.guild.roles.everyone, { SendMessages: null });
+      } catch (err) {
+        await ctx.reply({ content: `❌ Couldn't unlock that channel: ${err.message}`, ephemeral: true });
+        return;
+      }
+
+      modLogStore.addCase(ctx.guild.id, { type: 'unlock', targetId: channel.id, moderatorId: ctx.user.id, reason: null });
+      await ctx.reply(`🔓 <#${channel.id}> is now unlocked.`);
+      await logSystem.logAction(ctx.guild, `🔓 <#${channel.id}> was unlocked by <@${ctx.user.id}>.`);
+    }
+
+    else if (commandName === 'slowmode') {
+      if (!(await permissions.requirePermission(ctx, PermissionFlagsBits.ManageChannels, 'Manage Channels'))) return;
+      const seconds = ctx.options.getInteger('seconds');
+      const channel = ctx.options.getChannel('channel') || ctx.channel;
+
+      if (seconds < 0 || seconds > 21600) {
+        await ctx.reply({ content: 'Slowmode must be between 0 (off) and 21600 seconds (6 hours) — that\'s Discord\'s own limit.', ephemeral: true });
+        return;
+      }
+
+      try {
+        await channel.setRateLimitPerUser(seconds);
+      } catch (err) {
+        await ctx.reply({ content: `❌ Couldn't set slowmode: ${err.message}`, ephemeral: true });
+        return;
+      }
+
+      await ctx.reply(seconds === 0
+        ? `⏱️ Slowmode turned off in <#${channel.id}>.`
+        : `⏱️ Slowmode set to **${seconds}s** in <#${channel.id}>.`);
+    }
+
+    else if (commandName === 'modlogs') {
+      if (!(await permissions.requirePermission(ctx, PermissionFlagsBits.ModerateMembers, 'Timeout Members'))) return;
+      const user = ctx.options.getUser('user');
+      const cases = modLogStore.getCasesForUser(ctx.guild.id, user.id, 15);
+
+      const TYPE_LABEL = {
+        kick: '👢 Kick', ban: '🔨 Ban', softban: '🧹 Softban', mute: '🔇 Mute',
+        unmute: '🔊 Unmute', unban: '🔓 Unban', warn: '⚠️ Warn', lock: '🔒 Lock', unlock: '🔓 Unlock',
+      };
+
+      const embed = new EmbedBuilder()
+        .setTitle(`📋 Moderation history — ${user.tag}`)
+        .setColor(0x5865F2)
+        .setThumbnail(user.displayAvatarURL({ size: 128 }))
+        .setTimestamp();
+
+      if (cases.length === 0) {
+        embed.setDescription('No moderation actions on record for this user.');
+      } else {
+        embed.setDescription(cases.map(c =>
+          `**Case #${c.caseId}** — ${TYPE_LABEL[c.type] || c.type} — <t:${Math.floor(c.timestamp / 1000)}:R>\n` +
+          `By <@${c.moderatorId}>${c.extra?.durationDisplay ? ` for ${c.extra.durationDisplay}` : ''}\n` +
+          `Reason: ${c.reason}`
+        ).join('\n\n'));
+      }
+
+      await ctx.reply({ embeds: [embed], ephemeral: true });
     }
 
     else if (commandName === 'card') {
@@ -922,7 +1088,7 @@ async function runCommand(commandName, ctx) {
         .setColor(0x5865F2)
         .setDescription(
           `Every command works as both a slash command and a prefix command — e.g. \`/kick\` or \`${prefix}kick\`.\n\n` +
-          `\`purge <amount> [user]\` — bulk-delete messages\n` +
+          `\`purge <amount> [user] [bots_only] [contains] [has_link] [has_attachment] [include_pinned]\` — bulk-delete messages (filters work as both slash options and \`${prefix}purge\` flags — see \`${prefix}purge\` with no args)\n` +
           `\`snipe\` — show the last deleted message here\n` +
           `\`serverinfo\` — advanced server info\n` +
           `\`role <add|remove> <user> <role>\` — manage a member's role\n` +
@@ -930,7 +1096,7 @@ async function runCommand(commandName, ctx) {
           `\`enable [channel]\` — turn commands back on in a channel\n` +
           `\`whitelist <on|off|add|remove|list>\` — restrict commands to specific channels\n` +
           `\`setprefix <prefix>\` — change the prefix\n\n` +
-          `Plus: \`kick\`, \`ban\`, \`unban\`, \`unmute\`, \`warn\`, \`level\`, \`embed\`, \`setup\`, \`ticket\`, \`verify\`, \`card\`, \`addactivityrole\`, \`removeactivityrole\`, \`listactivityroles\`, \`log\`, \`ping\`.`
+          `Plus: \`kick\`, \`ban\`, \`unban\`, \`mute\`, \`unmute\`, \`softban\`, \`lock\`, \`unlock\`, \`slowmode\`, \`modlogs\`, \`warn\`, \`level\`, \`embed\`, \`setup\`, \`ticket\`, \`verify\`, \`card\`, \`addactivityrole\`, \`removeactivityrole\`, \`listactivityroles\`, \`log\`, \`ping\`.`
         );
       await ctx.reply({ embeds: [embed] });
     }
@@ -1241,6 +1407,15 @@ client.on('interactionCreate', async interaction => {
       return;
     }
 
+    else if (interaction.customId === 'embed_sendto_button') {
+      await interaction.update({
+        content: 'Pick the channel to send this embed to:',
+        embeds: embedBuilder.buildAllEmbeds(session),
+        components: [embedBuilder.buildSendToChannelRow()],
+      });
+      return;
+    }
+
     else if (interaction.customId === 'embed_cancel_button') {
       embedBuilder.clearSession(interaction.user.id);
       await interaction.update({ content: '❌ Cancelled.', embeds: [], components: [] });
@@ -1401,6 +1576,15 @@ client.on('interactionCreate', async interaction => {
     return;
   }
 
+  if (interaction.isButton() && interaction.customId.startsWith('ticket_claim_')) {
+    try {
+      await ticketSystem.handleClaimButtonClick(interaction);
+    } catch (error) {
+      console.error('Error claiming ticket:', error);
+    }
+    return;
+  }
+
   if (interaction.isButton() && interaction.customId.startsWith('ticket_close_')) {
     try {
       await ticketSystem.handleCloseButtonClick(interaction);
@@ -1426,6 +1610,30 @@ client.on('interactionCreate', async interaction => {
       await setupWizard.handleSelectMenu(interaction);
       return;
     }
+    if (interaction.isChannelSelectMenu() && interaction.customId === 'embed_sendto_channelselect') {
+      const session = embedBuilder.getSession(interaction.user.id);
+      const targetChannel = await interaction.guild.channels.fetch(interaction.values[0]).catch(() => null);
+      if (!targetChannel || !targetChannel.isTextBased()) {
+        await interaction.update({ content: '❌ Couldn\'t find that channel, or it\'s not a text channel.', components: [] });
+        return;
+      }
+
+      const allEmbeds = embedBuilder.buildAllEmbeds(session);
+      const buttonsRow = embedBuilder.buildButtonsRow(session);
+      const componentsToSend = buttonsRow ? [buttonsRow] : [];
+
+      try {
+        await targetChannel.send({ embeds: allEmbeds, components: componentsToSend });
+      } catch (err) {
+        await interaction.update({ content: `❌ Couldn't send to <#${targetChannel.id}>: ${err.message}`, components: [] });
+        return;
+      }
+
+      embedBuilder.clearSession(interaction.user.id);
+      await interaction.update({ content: `✅ Sent to <#${targetChannel.id}>!`, embeds: allEmbeds, components: [] });
+      return;
+    }
+
     if ((interaction.isChannelSelectMenu() || interaction.isRoleSelectMenu()) && interaction.customId.startsWith('ticketsetup_')) {
       await ticketSystem.handleSetupSelect(interaction);
       return;

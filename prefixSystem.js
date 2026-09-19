@@ -95,15 +95,41 @@ function parseChannelArg(message, args) {
 
 // ---- Commands ----
 
+const PURGE_USAGE = '`!purge <amount 1-100> [@user] [--bots] [--link] [--attachment] [--pinned] [--contains <text>]`';
+
 async function cmdPurge(message, args) {
   if (!(await requirePermission(message, PermissionFlagsBits.ManageMessages, 'Manage Messages'))) return;
 
   const targetUser = message.mentions.users.first();
-  const amountArg = args.find(a => !a.startsWith('<@')); // the numeric arg, skipping a mention
+
+  // Filters — mirrors every option /purge has, as flags instead of slash options.
+  let botsOnly = false;
+  let hasLink = false;
+  let hasAttachment = false;
+  let includePinned = false;
+  let containsText = null;
+
+  const remaining = [];
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    const lower = arg.toLowerCase();
+    if (lower === '--bots' || lower === '--bots-only') { botsOnly = true; continue; }
+    if (lower === '--link' || lower === '--has-link') { hasLink = true; continue; }
+    if (lower === '--attachment' || lower === '--has-attachment') { hasAttachment = true; continue; }
+    if (lower === '--pinned' || lower === '--include-pinned') { includePinned = true; continue; }
+    if (lower === '--contains') {
+      containsText = args.slice(i + 1).join(' ').trim() || null;
+      break; // everything after --contains is the search text, so stop scanning args
+    }
+    if (/^<@[!&]?\d+>$/.test(arg)) continue; // mention token, already read via message.mentions
+    remaining.push(arg);
+  }
+
+  const amountArg = remaining.find(a => /^\d+$/.test(a));
   const amount = parseInt(amountArg, 10);
 
   if (!amount || amount < 1 || amount > 100) {
-    await message.reply('Usage: `!purge <amount 1-100> [@user]`');
+    await message.reply(`Usage: ${PURGE_USAGE}`);
     return;
   }
 
@@ -115,12 +141,18 @@ async function cmdPurge(message, args) {
     return;
   }
 
+  const linkPattern = /https?:\/\/\S+/i;
   let toDelete = [...fetched.values()];
   if (targetUser) toDelete = toDelete.filter(m => m.author.id === targetUser.id);
+  if (botsOnly) toDelete = toDelete.filter(m => m.author.bot);
+  if (containsText) toDelete = toDelete.filter(m => m.content.toLowerCase().includes(containsText.toLowerCase()));
+  if (hasLink) toDelete = toDelete.filter(m => linkPattern.test(m.content));
+  if (hasAttachment) toDelete = toDelete.filter(m => m.attachments.size > 0 || m.embeds.length > 0);
+  if (!includePinned) toDelete = toDelete.filter(m => !m.pinned);
   toDelete = toDelete.slice(0, amount);
 
   if (toDelete.length === 0) {
-    await message.channel.send('Nothing to delete.').then(m => setTimeout(() => m.delete().catch(() => {}), 5000));
+    await message.channel.send('Nothing matched those filters.').then(m => setTimeout(() => m.delete().catch(() => {}), 5000));
     return;
   }
 
@@ -318,7 +350,7 @@ async function cmdHelp(message) {
     .setTitle('📖 Prefix Commands')
     .setColor(0x5865F2)
     .setDescription(
-      `\`${prefix}purge <amount> [@user]\` — bulk-delete messages\n` +
+      `\`${prefix}purge <amount> [@user] [--bots] [--link] [--attachment] [--pinned] [--contains <text>]\` — bulk-delete messages\n` +
       `\`${prefix}snipe\` — show the last deleted message here\n` +
       `\`${prefix}serverinfo\` — advanced server info\n` +
       `\`${prefix}role add|remove @user @role\` — manage a member's role\n` +
@@ -326,7 +358,7 @@ async function cmdHelp(message) {
       `\`${prefix}enable [#channel]\` — turn commands back on in a channel\n` +
       `\`${prefix}whitelist on|off|add|remove|list\` — restrict commands to specific channels\n` +
       `\`${prefix}setprefix <prefix>\` — change this prefix\n\n` +
-      `**Every original slash command also works with this prefix** — e.g. \`${prefix}kick @user spamming\`, \`${prefix}unban 123456789012345678\`, \`${prefix}unmute @user\`, \`${prefix}warn add @user rude\`, \`${prefix}level rank\`, \`${prefix}embed create\`, \`${prefix}setup general\`, \`${prefix}verify panel\`, \`${prefix}card gold Big announcement here!\`, etc. Slash commands (\`/kick\`, \`/warn\`, ...) still work too.`
+      `**Every original slash command also works with this prefix** — e.g. \`${prefix}kick @user spamming\`, \`${prefix}unban 123456789012345678\`, \`${prefix}unmute @user\`, \`${prefix}softban @user raiding\`, \`${prefix}lock\`, \`${prefix}unlock\`, \`${prefix}slowmode 10\`, \`${prefix}modlogs @user\`, \`${prefix}warn add @user rude\`, \`${prefix}level rank\`, \`${prefix}embed create\`, \`${prefix}setup general\`, \`${prefix}verify panel\`, \`${prefix}card gold Big announcement here!\`, etc. Slash commands (\`/kick\`, \`/warn\`, ...) still work too.`
     );
   await message.reply({ embeds: [embed] });
 }

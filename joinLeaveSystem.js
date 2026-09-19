@@ -26,6 +26,7 @@
 //   {inviteCount} - the inviter's TOTAL uses across all of their invite links combined,
 //                    or "Unknown" if it couldn't be determined
 
+const path = require('path');
 const { EmbedBuilder, AttachmentBuilder } = require('discord.js');
 
 let canvasLib = null;
@@ -33,6 +34,42 @@ try {
   canvasLib = require('@napi-rs/canvas');
 } catch {
   canvasLib = null; // fine — buildBanner() below falls back to a plain thumbnail embed
+}
+
+// Same bundled-font fix as photoCard.js: @napi-rs/canvas has zero system font
+// dependencies, so plain `sans-serif` silently renders no glyphs at all on a
+// bare host (Railway, Docker, etc.) — measureText() "works" but fillText()
+// draws nothing. Registering our own bundled font under a known family name
+// guarantees the caption text actually shows up, everywhere.
+const FONT_FAMILY = 'CardFont';
+let fontsReady = false;
+if (canvasLib?.GlobalFonts) {
+  try {
+    canvasLib.GlobalFonts.registerFromPath(path.join(__dirname, 'fonts', 'CardFont-Regular.ttf'), FONT_FAMILY);
+    canvasLib.GlobalFonts.registerFromPath(path.join(__dirname, 'fonts', 'CardFont-Bold.ttf'), FONT_FAMILY);
+    fontsReady = canvasLib.GlobalFonts.has(FONT_FAMILY);
+  } catch (err) {
+    console.error('[joinLeaveSystem] Failed to register bundled font, caption may not render:', err.message);
+  }
+}
+const FONT_STACK = fontsReady ? `"${FONT_FAMILY}", sans-serif` : 'sans-serif';
+
+// Same defensive fetch as photoCard.js: a real User-Agent (some hosts/CDNs
+// are stricter about UA-less requests) plus a timeout so a hanging avatar
+// fetch can't hang the whole join/leave event.
+async function fetchImageBuffer(url) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10_000);
+  try {
+    const res = await fetch(url, {
+      signal: controller.signal,
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; DiscordBotCardGenerator/1.0)' },
+    });
+    if (!res.ok) throw new Error(`Could not fetch the avatar (status ${res.status})`);
+    return Buffer.from(await res.arrayBuffer());
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 function fillPlaceholders(template, member, inviteInfo) {
@@ -90,8 +127,7 @@ async function buildBanner(member, kind) {
 
     // Avatar, centered, with a colored ring
     const avatarUrl = member.user.displayAvatarURL({ extension: 'png', size: 256 });
-    const avatarResp = await fetch(avatarUrl);
-    const avatarBuf = Buffer.from(await avatarResp.arrayBuffer());
+    const avatarBuf = await fetchImageBuffer(avatarUrl);
     const avatarImg = await loadImage(avatarBuf);
 
     const avatarSize = 110;
@@ -113,10 +149,10 @@ async function buildBanner(member, kind) {
     // Caption
     ctx.textAlign = 'center';
     ctx.fillStyle = '#FFFFFF';
-    ctx.font = 'bold 34px sans-serif';
+    ctx.font = `bold 34px ${FONT_STACK}`;
     ctx.fillText(kind === 'join' ? 'WELCOME' : 'GOODBYE', cx, 210);
 
-    ctx.font = '22px sans-serif';
+    ctx.font = `22px ${FONT_STACK}`;
     ctx.fillStyle = '#B9BBBE';
     ctx.fillText(member.user.username, cx, 245);
 

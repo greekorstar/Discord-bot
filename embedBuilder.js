@@ -20,6 +20,8 @@ const {
   ButtonBuilder,
   ButtonStyle,
   StringSelectMenuBuilder,
+  ChannelSelectMenuBuilder,
+  ChannelType,
   EmbedBuilder,
   AttachmentBuilder,
 } = require('discord.js');
@@ -392,9 +394,21 @@ function buildNavRow(session) {
 
 function buildActionRow(session) {
   const editing = !!session.editingMessageId;
-  return new ActionRowBuilder().addComponents(
+  const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('embed_send_button').setLabel(editing ? 'Save Changes' : 'Send').setStyle(ButtonStyle.Success),
     new ButtonBuilder().setCustomId('embed_cancel_button').setLabel('Cancel').setStyle(ButtonStyle.Danger),
+  );
+  // Sending to a different channel only makes sense for a brand-new embed —
+  // editing always targets the message's own original channel.
+  if (!editing) {
+    row.addComponents(new ButtonBuilder().setCustomId('embed_sendto_button').setLabel('Send to...').setStyle(ButtonStyle.Secondary));
+  }
+  return row;
+}
+
+function buildSendToChannelRow() {
+  return new ActionRowBuilder().addComponents(
+    new ChannelSelectMenuBuilder().setCustomId('embed_sendto_channelselect').setPlaceholder('Pick a channel to send this embed to').addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
   );
 }
 
@@ -566,6 +580,7 @@ module.exports = {
   buildButtonsRow,
   buildControlRows,
   buildManageButtonsRows,
+  buildSendToChannelRow,
   buildButtonActionSelectRow,
   buildButtonColorSelectRow,
   buildColorPresetSelectRow,

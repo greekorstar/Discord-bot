@@ -422,6 +422,48 @@ try {
   canvasLib = null; // fine — buildRankCard() falls back to an embed
 }
 
+// Same bundled-font fix as photoCard.js/joinLeaveSystem.js: @napi-rs/canvas
+// has zero system font dependencies, so plain `sans-serif` silently renders
+// no glyphs at all on a bare host — text would be invisible on the rank
+// card without this.
+const RANK_FONT_FAMILY = 'CardFont';
+let rankFontsReady = false;
+if (canvasLib?.GlobalFonts) {
+  try {
+    canvasLib.GlobalFonts.registerFromPath(path.join(__dirname, 'fonts', 'CardFont-Regular.ttf'), RANK_FONT_FAMILY);
+    canvasLib.GlobalFonts.registerFromPath(path.join(__dirname, 'fonts', 'CardFont-Bold.ttf'), RANK_FONT_FAMILY);
+    rankFontsReady = canvasLib.GlobalFonts.has(RANK_FONT_FAMILY);
+  } catch (err) {
+    console.error('[levelSystem] Failed to register bundled font, rank card text may not render:', err.message);
+  }
+}
+const RANK_FONT_STACK = rankFontsReady ? `"${RANK_FONT_FAMILY}", sans-serif` : 'sans-serif';
+
+async function fetchAvatarBuffer(url) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10_000);
+  try {
+    const res = await fetch(url, {
+      signal: controller.signal,
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; DiscordBotCardGenerator/1.0)' },
+    });
+    if (!res.ok) throw new Error(`Could not fetch the avatar (status ${res.status})`);
+    return Buffer.from(await res.arrayBuffer());
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function roundedRect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
 function guildRank(guildId, userId) {
   const sorted = topEntries(guildId, 'xp', Infinity);
   const index = sorted.findIndex(e => e.userId === userId);
@@ -449,21 +491,41 @@ async function buildRankCard(member) {
   }
 
   try {
-    const { createCanvas, loadImage, GlobalFonts } = canvasLib;
+    const { createCanvas, loadImage } = canvasLib;
     const width = 900, height = 260;
     const canvas = createCanvas(width, height);
     const ctx = canvas.getContext('2d');
 
-    // Background
-    ctx.fillStyle = '#23272A';
+    // Rounded card frame with a subtle two-tone background + accent glow,
+    // instead of a flat single-color rectangle.
+    const outerR = 24;
+    roundedRect(ctx, 0, 0, width, height, outerR);
+    ctx.save();
+    ctx.clip();
+
+    const bgGrad = ctx.createLinearGradient(0, 0, width, height);
+    bgGrad.addColorStop(0, '#1E2124');
+    bgGrad.addColorStop(1, '#26292D');
+    ctx.fillStyle = bgGrad;
     ctx.fillRect(0, 0, width, height);
 
-    // Avatar
+    ctx.globalAlpha = 0.10;
+    ctx.fillStyle = '#5865F2';
+    ctx.beginPath(); ctx.arc(width - 60, -20, 160, 0, Math.PI * 2); ctx.fill();
+    ctx.globalAlpha = 1;
+
+    // Avatar with an accent ring (top rank gets a gold ring instead)
     const avatarUrl = member.displayAvatarURL({ extension: 'png', size: 256 });
-    const avatarResp = await fetch(avatarUrl);
-    const avatarBuf = Buffer.from(await avatarResp.arrayBuffer());
+    const avatarBuf = await fetchAvatarBuffer(avatarUrl);
     const avatarImg = await loadImage(avatarBuf);
     const avatarSize = 160, avatarX = 50, avatarY = 50;
+    const ringColor = rank === 1 ? '#F5A623' : '#5865F2';
+
+    ctx.beginPath();
+    ctx.arc(avatarX + avatarSize / 2, avatarY + avatarSize / 2, avatarSize / 2 + 6, 0, Math.PI * 2);
+    ctx.fillStyle = ringColor;
+    ctx.fill();
+
     ctx.save();
     ctx.beginPath();
     ctx.arc(avatarX + avatarSize / 2, avatarY + avatarSize / 2, avatarSize / 2, 0, Math.PI * 2);
@@ -474,28 +536,60 @@ async function buildRankCard(member) {
 
     // Username
     ctx.fillStyle = '#FFFFFF';
-    ctx.font = 'bold 36px sans-serif';
+    ctx.font = `bold 36px ${RANK_FONT_STACK}`;
     ctx.fillText(member.user.username, 240, 100);
 
-    // Rank & level (right-aligned block)
-    ctx.font = 'bold 28px sans-serif';
-    ctx.fillStyle = '#F5A623';
-    ctx.textAlign = 'right';
-    ctx.fillText(`RANK #${rank}`, width - 50, 60);
-    ctx.fillText(`LEVEL ${level}`, width - 50, 100);
-    ctx.textAlign = 'left';
+    // Rank & level, as small pill badges instead of plain right-aligned text
+    ctx.font = `bold 24px ${RANK_FONT_STACK}`;
+    const rankLabel = `RANK #${rank}`;
+    const levelLabel = `LEVEL ${level}`;
+    const rankW = ctx.measureText(rankLabel).width + 32;
+    const levelW = ctx.measureText(levelLabel).width + 32;
 
-    // XP progress bar
-    const barX = 240, barY = 150, barW = 610, barH = 36;
-    ctx.fillStyle = '#4F545C';
-    ctx.fillRect(barX, barY, barW, barH);
-    const progress = Math.max(0, Math.min(1, xpIntoLevel / xpForNext));
+    roundedRect(ctx, width - 50 - levelW, 40, levelW, 40, 20);
     ctx.fillStyle = '#5865F2';
-    ctx.fillRect(barX, barY, barW * progress, barH);
+    ctx.fill();
+    roundedRect(ctx, width - 50 - levelW - 14 - rankW, 40, rankW, 40, 20);
+    ctx.fillStyle = ringColor;
+    ctx.fill();
 
     ctx.fillStyle = '#FFFFFF';
-    ctx.font = '20px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(levelLabel, width - 50 - levelW / 2, 68);
+    ctx.fillText(rankLabel, width - 50 - levelW - 14 - rankW / 2, 68);
+    ctx.textAlign = 'left';
+
+    // XP progress bar, rounded with a gradient fill and a percentage label
+    const barX = 240, barY = 150, barW = 610, barH = 32;
+    roundedRect(ctx, barX, barY, barW, barH, barH / 2);
+    ctx.fillStyle = '#4F545C';
+    ctx.fill();
+
+    const progress = Math.max(0, Math.min(1, xpIntoLevel / xpForNext));
+    if (progress > 0) {
+      roundedRect(ctx, barX, barY, Math.max(barH, barW * progress), barH, barH / 2);
+      const barGrad = ctx.createLinearGradient(barX, 0, barX + barW, 0);
+      barGrad.addColorStop(0, '#5865F2');
+      barGrad.addColorStop(1, '#8B5CF6');
+      ctx.fillStyle = barGrad;
+      ctx.fill();
+    }
+
+    ctx.fillStyle = '#FFFFFF';
+    ctx.font = `20px ${RANK_FONT_STACK}`;
     ctx.fillText(`${xpIntoLevel} / ${xpForNext} XP`, barX, barY + barH + 30);
+    ctx.textAlign = 'right';
+    ctx.fillStyle = '#B9BBBE';
+    ctx.fillText(`${Math.round(progress * 100)}%`, barX + barW, barY + barH + 30);
+    ctx.textAlign = 'left';
+
+    ctx.restore(); // release the outer rounded-rect clip
+
+    // Thin border for a finished look
+    roundedRect(ctx, 2, 2, width - 4, height - 4, outerR);
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+    ctx.stroke();
 
     const buffer = canvas.toBuffer('image/png');
     const attachment = new AttachmentBuilder(buffer, { name: 'rank.png' });
